@@ -1135,6 +1135,7 @@ async def refresh_unchanged_history(
         upsert_health_findings,
         upsert_health_metrics,
     )
+    from repowise.core.pipeline.persist import _analyzed_commit
 
     stored = {
         m.file_path: m
@@ -1191,6 +1192,16 @@ async def refresh_unchanged_history(
                 file_paths=[r.file_path for r in finding_writes],
             )
         if metric_writes:
+            # A rescored row is scored against this commit: its history is
+            # read from it, and the file is unchanged since its last parse.
+            # Keeping the old stamp made the newest row name a commit 100
+            # behind, and the health basis reads the newest row. Set on each
+            # row, not passed as the writer's default: when HEAD cannot be read
+            # the stamp is cleared, since "not recorded" is honest and the old
+            # commit is not.
+            commit = await _analyzed_commit(session, repo_id)
+            for row in metric_writes:
+                row["analyzed_commit"] = commit
             await upsert_health_metrics(session, repo_id, metric_writes)
     logger.debug(
         "health_history_refreshed",
