@@ -423,9 +423,9 @@ _SECRET_SPECIFICITY: dict[str, int] = {
 # is a key's or marker's name, a constant holding its own name, and a template
 # placeholder or shell substitution is filled in when it runs; none of them is a
 # credential. Letters only: a digit or capital makes it look like a key.
-_TEMPLATE_VALUE = re.compile(r"\{\{.*\}\}|\$\{[^}]*\}|\$\(.*\)")
+_TEMPLATE_VALUE = re.compile(r"\{\{.*?\}\}|\$\{.*?\}|\$\(.*?\)")
 _SCHEME_TEMPLATE_VALUE = re.compile(
-    r"(?i:(?:bearer|basic|token))\s+(?:\{\{.*\}\}|\$\{[^}]*\}|\$\(.*\))"
+    r"(?i:(?:bearer|basic|token))\s+(?:\{\{.*?\}\}|\$\{.*?\}|\$\(.*?\))"
 )
 _OWN_NAME_VALUE = re.compile(r"[A-Za-z_-]+")
 _CONSTANT_NAME = re.compile(r"[A-Z][A-Z0-9_]*")
@@ -474,8 +474,8 @@ def _is_secret_value(kind: str, val: str, name: str = "") -> bool:
         return False
     # A leading ``--`` is a CSS custom property or a CLI flag, not a key.
     return not (
-        _TEMPLATE_VALUE.fullmatch(value)
-        or _SCHEME_TEMPLATE_VALUE.fullmatch(value)
+        _TEMPLATE_VALUE.search(value)
+        or _SCHEME_TEMPLATE_VALUE.search(value)
         or _is_plain_word(value)
         or value.startswith("--")
     )
