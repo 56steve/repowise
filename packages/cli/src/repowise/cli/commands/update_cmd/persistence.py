@@ -1409,6 +1409,11 @@ async def _persist_full_update_async(
                     "Configuration rebuild did not update every dependent store; "
                     "the previous fingerprint was retained so the next update retries."
                 )
+            # The transaction commits as the block exits.
+            if timings is not None:
+                timings.start("persist.commit")
+        if timings is not None:
+            timings.stop("persist.commit")
 
         # FTS outside the transaction — rebuildable, and its writer manages
         # its own connection state.
@@ -1460,6 +1465,13 @@ async def _persist_full_update_async(
                 _skip("Deferred vector cleanup", exc)
                 if require_config_rebuild_success:
                     raise
+
+        # After the transaction, so the scan never holds the write lock, and on
+        # every update, so a backlog an earlier budget left drains.
+        from repowise.core.pipeline.commit_health import refresh_commit_health_after_update
+
+        with timed(timings, "persist.commit_health"):
+            await refresh_commit_health_after_update(sf, repo_id, str(repo_path))
         return total_pages
     finally:
         await engine.dispose()
