@@ -115,7 +115,8 @@ Plan detail also lists `risks`, one sentence each, to read before applying the
 plan: an accepted decision that governs the file, callers or importers of what
 the plan moves, a target nothing reaches (delete it instead), and recent commits
 on the same lines, and a test the plan runs that asserts on the function's own
-source text. A governed plan's steps are `judgment`, and its
+source text. When the plan changes a symbol a package exports to its consumers,
+the risk names the file exporting it. A governed plan's steps are `judgment`, and its
 `blast_radius.co_change_partners` names the files that usually change with it.
 A newly accepted decision shows here after the next index or update.
 
