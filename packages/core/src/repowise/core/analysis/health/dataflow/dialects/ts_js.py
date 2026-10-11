@@ -43,6 +43,8 @@ _SHORTHAND_PAT = "shorthand_property_identifier_pattern"
 _PAIR_PATTERN = "pair_pattern"
 _REST_PATTERN = "rest_pattern"
 _ASSIGN_PATTERN = "assignment_pattern"  # default value ``a = 1`` in a pattern
+_CATCH = "catch_clause"
+_PARAM_PATTERNS = frozenset({_ARRAY_PATTERN, _OBJECT_PATTERN, _REST_PATTERN, _ASSIGN_PATTERN})
 # Member / subscript targets bind no local.
 _MEMBER = "member_expression"
 _SUBSCRIPT = "subscript_expression"
@@ -119,6 +121,16 @@ class TsJsDefUseDialect(BaseDefUseDialect):
             self._process(node, defs, uses)
         return StatementDefUse(defs=tuple(defs), uses=tuple(uses))
 
+    def handler_def_use(self, handler: Node) -> StatementDefUse:
+        """``catch (e)`` / ``catch ({ message })`` binds its names for the
+        handler block only."""
+        defs: list[Occurrence] = []
+        param = handler.child_by_field_name("parameter")
+        self._targets(param, defs, [])
+        if param is not None:
+            self._declare(defs, 0, param)
+        return StatementDefUse(defs=tuple(defs), uses=())
+
     def declared_type(self, name: Node) -> str | None:
         """The base rule, plus ``| undefined`` for an optional parameter
         (``x?: T`` holds ``T | undefined`` until something narrows it)."""
@@ -137,9 +149,13 @@ class TsJsDefUseDialect(BaseDefUseDialect):
         out: list[Occurrence] = []
         sink: list[Occurrence] = []
         for child in params_node.named_children:
+            # TS wraps each parameter (``required_parameter``); JS lists the name
+            # or pattern itself (``b = 1``, ``{ a, b }``, ``[a]``, ``...rest``).
             pattern = child.child_by_field_name("pattern")
-            if pattern is None:
-                pattern = child if child.type in self.identifier_kinds else None
+            if pattern is None and (
+                child.type in self.identifier_kinds or child.type in _PARAM_PATTERNS
+            ):
+                pattern = child
             self._targets(pattern, out, sink)
         return tuple(out)
 
@@ -214,6 +230,11 @@ class TsJsDefUseDialect(BaseDefUseDialect):
                 self._targets(declarator.child_by_field_name("name"), defs, uses)
                 self._declare(defs, start, declarator, binds=t != _VAR_DECL)
                 self._process(declarator.child_by_field_name("value"), defs, uses)
+            return
+        if t == _CATCH:  # a nested scope's handler, walked whole
+            sdu = self.handler_def_use(node)
+            defs.extend(sdu.defs)
+            self._process(node.child_by_field_name("body"), defs, uses)
             return
         if t in self.member_access_kinds:
             self.collect_reads(node, uses)  # receiver is a read; property is not
