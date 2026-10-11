@@ -91,6 +91,7 @@ from .risk_factors import (
     path_risk_factors,
     risk_evidence,
 )
+from .vbnet_modules import vbnet_module_names
 
 #: The unindexed scan below and the repo-wide absence check ask the same
 #: question of different file sets, so they share one identifier shape rather
@@ -738,7 +739,8 @@ class _ExportFile:
     # ``using`` names a namespace, so neither says anything about a symbol.
     importers_name_symbols: bool
     # Classes holding C# extension methods, called as ``x.Method()`` without
-    # naming the class, so no importer would name them either.
+    # naming the class, and VB.NET Modules, whose members are in scope
+    # unqualified: no importer would name either.
     extension_containers: frozenset[str]
     imported_as_namespace: bool
     enclosing_ranges: list[tuple[int, int]]
@@ -1462,7 +1464,7 @@ class DeadCodeAnalyzer:
             node_data=node_data,
             symbol_pairs=symbol_pairs,
             importers_name_symbols=self._importers_name_symbols(node, symbols),
-            extension_containers=self._extension_containers(node_data, symbol_pairs),
+            extension_containers=self._extension_containers(node, node_data, symbol_pairs),
             imported_as_namespace=self._imported_as_namespace(node, node_data),
             # Function bodies, so nested defs (closures) can be skipped.
             enclosing_ranges=[
@@ -1482,12 +1484,15 @@ class DeadCodeAnalyzer:
         )
 
     def _extension_containers(
-        self, node_data: dict, symbol_pairs: list[tuple[str, dict]]
+        self, node: Any, node_data: dict, symbol_pairs: list[tuple[str, dict]]
     ) -> frozenset[str]:
-        """Names of the classes in this file that declare a C# extension method."""
+        """Containers here a use never names: C# extension holders, VB.NET Modules."""
         if node_data.get("language") not in _CONTAINER_USE_LANGUAGES:
             return frozenset()
-        return frozenset(
+        modules = vbnet_module_names(
+            (sym for _, sym in symbol_pairs), self._source_map.get(str(node))
+        )
+        return modules | frozenset(
             sym.get("name", "")
             for sym_id, sym in symbol_pairs
             if self._declares_extension_method(sym_id)
@@ -1695,7 +1700,7 @@ class DeadCodeAnalyzer:
 
         Not when no importer names this file's symbols; not where the
         preprocessor reaches a symbol through macros, typedef aliases and token
-        pasting; not for a class holding C# extension methods.
+        pasting; not for a C# extension holder or a VB.NET Module.
         """
         return (
             file_ctx.importers_name_symbols
