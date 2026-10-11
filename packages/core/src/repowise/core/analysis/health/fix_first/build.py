@@ -35,7 +35,8 @@ Row shapes (field names are the SQL columns):
     Plan rows named by a refactoring step: ``public_id``, ``evidence`` /
     ``evidence_json`` and ``plan`` / ``plan_json`` (an extract-method ``span``,
     ``params``, ``returns``, ``suggested_name``, ``anchors``; a move's destination; a
-    split's named groups; a helper's ``occurrences``). A plan row that also
+    split's named groups; a helper's ``occurrences``) and ``rank`` / ``rank_json``
+    (``leaves_above_bar``). A plan row that also
     carries ``refactoring_type`` ``extract_method``, ``file_path`` and
     ``target_symbol`` can give a finding with no plan of its own its first
     concrete step. Every Extract Helper plan's occurrences say where verified
@@ -99,6 +100,8 @@ from repowise.core.analysis.health.suggestions import suggestion_for
 from repowise.core.analysis.health.worth import (
     SIZE_MARKERS,
     WORTH_MAGNITUDE,
+    LowPriority,
+    by_function,
     execution_role,
     low_priority,
     magnitude,
@@ -402,7 +405,8 @@ class _Files:
         if best is not None:
             start, end = _span(best)
             body = _plan_body(best)
-            return FixStep(1, _extract_text(tail, body, start, end), path, start, **_helper_code(body))
+            step = _above_bar_note(_extract_text(tail, body, start, end), best)
+            return FixStep(1, step, path, start, **_helper_code(body))
         shape = self.shape(path, function)
         start, end = shape.get("deep_start"), shape.get("deep_end")
         if start and end:
@@ -605,6 +609,23 @@ def _plan_body(plan: Any) -> dict[str, Any]:
         return {}
     body = json_field(plan, "plan", None) or json_field(plan, "plan_json", {})
     return body if isinstance(body, dict) else {}
+
+
+def _above_bar(details: Mapping[str, Any]) -> LowPriority | None:
+    """An opportunity one of whose plans, applied as written, still leaves a
+    function above the break-up bar: half a fix, so it can wait."""
+    return "above_bar_after" if details.get("leaves_above_bar") else None
+
+
+def _above_bar_note(step: str, plan: Any) -> str:
+    """A finding's borrowed *step*, saying so when the plan, applied as
+    written, leaves the function above the break-up bar (its rank facts'
+    ``leaves_above_bar``, in the plan's own words)."""
+    rank = json_field(plan, "rank", None) or json_field(plan, "rank_json", {})
+    reason = rank.get("leaves_above_bar") if isinstance(rank, dict) else None
+    if not (isinstance(reason, str) and reason):
+        return step
+    return f"{step.removesuffix('.')}. This plan alone {reason}."
 
 
 def _evidence(plan: Any) -> dict[str, Any]:
@@ -884,7 +905,7 @@ class _RefactorPlan:
             central,
             files.churning(path),
             cloned=function_size and files.cloned(path, shape),
-            low=low_priority(marker, shape, function_size=function_size),
+            low=low_priority(marker, shape, function_size=function_size) or _above_bar(details),
             gain=gain,
             ccn_removed=sum(_extraction_worth(plans.get(s.get("plan_id")))[0] for s in steps),
             dependents=deps,
@@ -1431,15 +1452,6 @@ def _clone_spans(plans: Iterable[Any]) -> dict[str, list[tuple[int, int]]]:
     return dict(out)
 
 
-def _by_function(findings: Iterable[Any]) -> dict[tuple[str, str], list[Any]]:
-    out: dict[tuple[str, str], list[Any]] = defaultdict(list)
-    for f in findings:
-        name = field(f, "function_name")
-        if name:
-            out[(field(f, "file_path"), name)].append(f)
-    return dict(out)
-
-
 def _basis(metrics: Rows) -> dict[str, str | None]:
     stamped = [(str(at), at, m) for m in metrics if (at := field(m, "updated_at"))]
     if not stamped:
@@ -1478,7 +1490,7 @@ def _prepare(
     files = _Files(
         metrics,
         {p: hist for p, (_shape, hist) in split.items() if hist},
-        _by_function(f for shape, _hist in split.values() for f in shape),
+        by_function(f for shape, _hist in split.values() for f in shape),
         hot_cuts,
         _clone_spans(plans),
         _extractions(plans),

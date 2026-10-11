@@ -506,3 +506,49 @@ def test_malformed_anchors_fall_back_to_lines() -> None:
     plans = _anchored_plans({"first": "a = 1", "last": None})
     core = next(i for i in _build(plans=plans).items if i.kind == "refactor")
     assert core.action.steps[0].text == "Extract lines 20-35 of run into sum_rows(rows, limit) -> total"
+
+
+def test_a_plan_that_leaves_its_function_above_the_bar_can_wait() -> None:
+    from repowise.core.analysis.health.worth import LOW_PRIORITY_LABEL
+
+    rows = copy.deepcopy(REFACTORING)
+    rows[0]["details"]["leaves_above_bar"] = (
+        "leaves run at CCN 41, still above the break-up bar; more stages needed"
+    )
+    core = next(i for i in _build(refactoring=rows).items if i.kind == "refactor")
+    assert core.tier == "later"
+    assert ("tier", LOW_PRIORITY_LABEL["above_bar_after"]) in [
+        (f.factor, f.value) for f in core.why_ranked
+    ]
+    # Without the reason the same plan is worth doing now.
+    assert next(i for i in _build().items if i.kind == "refactor").tier == "now"
+
+
+def test_a_finding_borrowing_a_plan_that_leaves_it_above_the_bar_says_so() -> None:
+    plans = copy.deepcopy(PLANS)
+    plans[0].update(
+        file_path="src/core.py",
+        target_symbol="src/core.py::run",
+        rank_json='{"leaves_above_bar": "leaves run at CCN 41, still above the break-up bar; '
+        'more stages needed"}',
+    )
+    lone = _build(plans=plans, refactoring=[], performance=[]).lead
+    # The finding keeps its tier; only its step says the plan is not the whole fix.
+    assert lone.tier != "later"
+    assert lone.action.steps[0].text == (
+        "Extract lines 20-35 of run into sum_rows(rows, limit) -> total. This plan alone "
+        "leaves run at CCN 41, still above the break-up bar; more stages needed."
+    )
+
+
+def test_plans_without_above_bar_facts_read_as_before() -> None:
+    # No rank facts, or rank facts without the reason: same steps, same tiers.
+    before = _build()
+    plans = copy.deepcopy(PLANS)
+    for plan in plans:
+        plan["rank_json"] = '{"position": 1}'
+    for queue in (_build(plans=plans), _build(plans=copy.deepcopy(PLANS))):
+        assert [(i.id, i.tier, [s.text for s in i.action.steps]) for i in queue.items] == [
+            (i.id, i.tier, [s.text for s in i.action.steps]) for i in before.items
+        ]
+    assert all("This plan alone" not in s.text for i in before.items for s in i.action.steps)
