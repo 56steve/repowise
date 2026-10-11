@@ -451,8 +451,13 @@ def _staged_fields(
     # Without an object (no free variable name for it) the values stay plain.
     context = staged.context if obj else ()
     imports = names.imports(analysis.fn_node)
+    # The function's import goes with the last stage reading it, so the code
+    # still runs when the stages before it are applied and tested alone.
+    last = {
+        imported: i for i, stage_imports in enumerate(staged.imports) for imported in stage_imports
+    }
     stages = []
-    for x, reimports in zip(staged.stages, staged.imports, strict=True):
+    for i, (x, reimports) in enumerate(zip(staged.stages, staged.imports, strict=True)):
         name = render.private_name(
             language,
             names.claim_first(
@@ -473,7 +478,8 @@ def _staged_fields(
             async_host=async_fields.get("async_host", True),
             leading=lead,
         )
-        _add_stage_notes(symbol["new_symbol"], lead, carried, reimports, staged.moved_imports)
+        moved = frozenset(m for m in staged.moved_imports if last.get(m) == i)
+        _add_stage_notes(symbol["new_symbol"], lead, carried, reimports, moved)
         stages.append(
             {
                 "span": {"start": x.start_line, "end": x.end_line},
