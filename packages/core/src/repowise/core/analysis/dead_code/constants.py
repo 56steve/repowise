@@ -806,6 +806,9 @@ _FRAMEWORK_DECORATORS: tuple[str, ...] = (
     "app.task",
     "celery.task",
     "shared_task",
+    # SQLAlchemy, imported bare: stored in the dialect compiler / event registry.
+    "compiles",
+    "listens_for",
     # Click CLI commands â€” registered with the parent group/command.
     "click.command",
     "click.group",
