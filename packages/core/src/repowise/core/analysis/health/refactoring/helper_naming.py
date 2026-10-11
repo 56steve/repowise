@@ -13,6 +13,7 @@ edit rather than a blank.
 
 from __future__ import annotations
 
+import itertools
 from collections.abc import Iterable, Iterator
 from typing import TYPE_CHECKING, Any
 
@@ -148,8 +149,11 @@ def helper_names(
         rest = subject[_overlap(host, subject) :]
         if rest:
             yield join_identifier([*host, *rest], _convention(language))
-    # A span with no subject (it only logs, say) is still a block of the host.
+    # A span with no subject (it only logs, say) is still a block of the host;
+    # numbered when that is taken too, so every plan ends with a free name.
     yield join_identifier([*host, "block"], _convention(language))
+    for n in itertools.count(2):
+        yield join_identifier([*host, "block", str(n)], _convention(language))
 
 
 def _overlap(host: list[str], subject: list[str]) -> int:
@@ -256,11 +260,11 @@ class ScopeNames:
 
     def claim_first(self, analysis: FunctionAnalysis, names: Iterable[str]) -> str | None:
         """The first of *names* free in the helper's scope, claimed; ``None``
-        when every one is taken."""
+        when every one is taken (:func:`helper_names` never runs out)."""
         return next((name for name in names if self.claim(analysis, name)), None)
 
     def _scope_names(self, scope: Any) -> set[str]:
-        names = {_key(n) for n in _defined_names(scope, self._lmap)}
+        names = {_key(n) for n in defined_names(scope, self._lmap)}
         if scope.parent is None:
             names |= {_key(n) for n in self.imports(scope)}
         return names
@@ -280,7 +284,7 @@ def _enclosing_scope(fn_node: Any, lmap: LanguageNodeMap) -> Any:
     return node if node is not None else fn_node
 
 
-def _defined_names(scope: Any, lmap: LanguageNodeMap) -> set[str]:
+def defined_names(scope: Any, lmap: LanguageNodeMap) -> set[str]:
     """Functions defined and names assigned directly in *scope* (not in nested
     functions or classes)."""
     fn_kinds = lmap.function_kinds | lmap.lambda_kinds
