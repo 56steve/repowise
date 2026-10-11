@@ -1273,6 +1273,32 @@ def apply_view(
     return spread
 
 
+def listed_steps(steps: Sequence[Mapping[str, Any]], start: int, stop: int) -> list[dict[str, Any]]:
+    """Steps ``[start, stop)`` of one opportunity as the plan list shows them.
+
+    A step whose ``relocated_by`` is a ``split_file`` step works on code that
+    split moves, so the split stands for it: the split's row lists its plan id
+    as ``relocates`` and it gets no row of its own. Listed one by one, a single
+    file filled the top of the list. Every other step keeps its row.
+    """
+    splits = {
+        str(step.get("plan_id"))
+        for step in steps
+        if step.get("refactoring_type") == "split_file"
+    }
+    folded: dict[str, list[str]] = {}
+    for step in steps:
+        if step.get("relocated_by") in splits:
+            folded.setdefault(str(step["relocated_by"]), []).append(str(step.get("plan_id")))
+    rows: list[dict[str, Any]] = []
+    for step in steps[start:stop]:
+        if step.get("relocated_by") in splits:
+            continue
+        relocates = folded.get(str(step.get("plan_id")))
+        rows.append({**step, "relocates": relocates} if relocates else dict(step))
+    return rows
+
+
 def _expand_scopes(path: str, reached: ReachedBy, expanded: list[str]) -> ReachedBy:
     """*reached* with a conftest or test package it stopped at replaced by *expanded*.
 
@@ -1329,6 +1355,7 @@ __all__ = [
     "detector_native_benefit",
     "enrich_blast_radius",
     "hub_files",
+    "listed_steps",
     "plan_types",
     "priority_score",
     "rehydrate_suggestion",

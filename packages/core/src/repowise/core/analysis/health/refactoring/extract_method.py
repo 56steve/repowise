@@ -33,7 +33,9 @@ A JSX function component whose decision points sit mostly in its markup
 (conditional spreads, ``&&`` and ternaries in attributes or children, template
 ternaries, all under a ``jsx_*`` node) is not offered one: that branching is prop plumbing, and a helper
 would only move it. CCN is left alone because it feeds the calibrated defect
-score; the gate is on eligibility.
+score; the gate is on eligibility. Nor is a flat record builder
+(:mod:`.declarative`): a function filling one value field by field behind
+independent guards, which a helper would split in two without simplifying.
 
 The candidate spans + IN/OUT come from ``dataflow.find_extractions``; this
 module only matches each analysed function to the biomarker finding that flags
@@ -113,7 +115,8 @@ from ..effort import effort_bucket
 from ..perf.dialects import PERF_DIALECTS
 from ..scoring import severity_deduction
 from . import render
-from .helper_naming import ScopeNames, helper_name, out_value_name
+from .declarative import declarative_flat
+from .helper_naming import ScopeNames, helper_names, out_value_name
 from .models import RefactoringContext, RefactoringSuggestion
 from .registry import RefactoringDetector, register
 
@@ -182,6 +185,11 @@ class ExtractMethodDetector(RefactoringDetector):
                 continue
             if jsx_plumbing_dominates(analysis.fn_node, lmap):
                 continue
+            if analysis.fn_node is not None and declarative_flat(
+                analysis.fn_node, lmap, {p.name for p in analysis.def_use.params}
+            ):
+                _mark_refused(matched, "declarative_flat")
+                continue
             markers = {getattr(f, "biomarker_type", "") for f in matched}
             fn_node = analysis.fn_node
             receiver = dialect.receiver(fn_node, lmap) if dialect and fn_node else None
@@ -200,9 +208,9 @@ class ExtractMethodDetector(RefactoringDetector):
             impact, share, source = self._impact_for(analysis, best, matched)
             name = render.private_name(
                 ctx.language,
-                names.claim(
+                names.claim_first(
                     analysis,
-                    helper_name(analysis, best, lmap, ctx.language, names.imports(fn_node)),
+                    helper_names(analysis, best, lmap, ctx.language, names.imports(fn_node)),
                 ),
             )
             async_fields = _async_fields(analysis, best, lmap, ctx.language)
@@ -331,6 +339,18 @@ class ExtractMethodDetector(RefactoringDetector):
         return "medium"
 
 
+#: The finding detail naming why a flagged function got no Extract Method plan.
+#: Stored with the finding, so refusals are counted from the index.
+REFUSED_DETAIL = "extract_method_refused"
+
+
+def _mark_refused(findings: list[Any], reason: str) -> None:
+    for f in findings:
+        details = getattr(f, "details", None)
+        if isinstance(details, dict):
+            details[REFUSED_DETAIL] = reason
+
+
 def recovered_share(
     biomarker: str, analysis: FunctionAnalysis, extraction: Extraction
 ) -> float:
@@ -394,7 +414,8 @@ def _staged_fields(
     stages = []
     for x, reimports in zip(staged.stages, staged.imports, strict=True):
         name = render.private_name(
-            language, names.claim(analysis, helper_name(analysis, x, lmap, language, imports))
+            language,
+            names.claim_first(analysis, helper_names(analysis, x, lmap, language, imports)),
         )
         carried = [p for p in x.params if p in context]
         own = replace(x, params=tuple(p for p in x.params if p not in context))
