@@ -46,6 +46,13 @@ Row shapes (field names are the SQL columns):
     ``start_line``, ``end_line``, ``confidence``, ``safe_to_delete``,
     ``status``. A unit an open row of :data:`DEAD_CONFIDENCE` or more (or one
     safe to delete) covers is ``unreachable``: the fix is to delete it.
+``function_changes``
+    ``git_function_blame`` ``mod_count`` by ``symbol_id`` (``path::name``):
+    the commits that changed each function. ``None`` when the repository keeps
+    no function history; a function missing from it changed in none.
+``blame_skipped``
+    Paths the blame pass skipped for size: their functions have no history,
+    so the file's churn orders them.
 """
 
 from __future__ import annotations
@@ -82,6 +89,7 @@ from repowise.core.analysis.health.queue.order import LEVEL_RANK, order
 from repowise.core.analysis.health.queue.value import (
     MIN_CHURN_COMMITS,
     function_reach,
+    history_weight,
     perf_confidence,
     perf_ready,
     perf_value,
@@ -151,6 +159,8 @@ MAX_CONTEXT = 3
 DEFAULT_LIMIT = 10
 #: Class-level findings: a fix names member groups, which only a plan holds.
 CLASS_MARKERS = frozenset({"low_cohesion", "god_class"})
+#: Refactorings that change one function, whose own history orders them.
+_FUNCTION_LEADS = frozenset({"extract_method", "move_method"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,6 +188,12 @@ class _Unit:
 def _tail(symbol: str | None) -> str | None:
     """A symbol's own name: ``a.py::Cls.run`` and ``Cls::run`` read ``run``."""
     return re.split(r"::|\.", symbol)[-1] if symbol else None
+
+
+def symbol_key(path: str, symbol: str | None) -> str | None:
+    """A function's ``git_function_blame`` key, ``path::name``; ``None`` for no symbol."""
+    name = text.short_symbol(symbol)
+    return f"{path}::{name}" if name else None
 
 
 def _open(row: Any) -> bool:
@@ -276,8 +292,12 @@ class _Files:
         clones: Mapping[str, list[tuple[int, int]]] | None = None,
         extractions: Mapping[tuple[str, str], list[Any]] | None = None,
         dead: Mapping[str, list[DeadSpan]] | None = None,
+        function_changes: Mapping[str, int] | None = None,
+        blame_skipped: Iterable[str] = (),
     ) -> None:
         self.by_path = {field(m, "file_path"): m for m in metrics}
+        self.function_changes = function_changes
+        self.blame_skipped = frozenset(blame_skipped)
         self.functions = functions
         self.clones = clones or {}
         self.extractions = extractions or {}
@@ -328,6 +348,17 @@ class _Files:
 
     def churning(self, path: str) -> bool:
         return self.commits(path) >= max(self.churn_cut, MIN_CHURN_COMMITS)
+
+    def changes(self, path: str, symbol: str | None, *, function: bool) -> int | None:
+        """Commits that changed the function ``symbol`` in ``path``, 0 with no
+        stored row; ``None`` when the repository keeps no function history,
+        the blame pass skipped the file for size, or the unit is led by no
+        function (a class, a file, a duplicated span), so its file's churn
+        stands in."""
+        key = symbol_key(path, symbol) if function else None
+        if self.function_changes is None or key is None or path in self.blame_skipped:
+            return None
+        return int(self.function_changes.get(key) or 0)
 
     def evidence(self, path: str, symbol: str | None) -> bool | None:
         """Whether history shows work on ``symbol`` pays: its file changes
@@ -435,13 +466,17 @@ class _Files:
         fallback: str,
         dependents: int | None = None,
         cloned: bool = False,
+        changes: int | None = None,
     ) -> str:
-        """One sentence: the problem, then why it matters here (who imports
-        the file, how often it changes, how much of it tests run)."""
+        """One sentence: the problem, then why it matters here (how often the
+        function changed, who imports the file, how often it changes, how much
+        of it tests run)."""
         deps = dependents if dependents is not None else self.dependents(path)
         head = measured or fallback.rstrip(". ")
         if cloned:
             head += f", {text.CLONED}"
+        if changes is not None and changes >= MIN_CHURN_COMMITS:
+            head += f"; {text.own_changes(changes)}"
         return f"{head}{text.exposure(deps, self.commits(path), self.coverage(path))}."
 
     def context(self, path: str) -> tuple[FixContext, ...]:
@@ -524,6 +559,8 @@ class _ShapeRank:
     shape: dict[str, int]
     central: bool
     churning: bool
+    #: Commits that changed the lead function (``_Files.changes``).
+    changes: int | None
     cloned: bool
     low: str | None
     gain: float
@@ -545,13 +582,18 @@ class _ShapeRank:
     def tier(self) -> str:
         return tier(self.cold_value, "medium", False, self.low)[0]
 
+    @property
+    def history(self) -> float:
+        return history_weight(self.changes, self.churning)
+
     def facts(self) -> list[FixRankFact]:
         size = size_value(self.shape, self.central) if self.low is None else worth_size(self.shape)
         return [
             FixRankFact("health gain", f"{self.gain:.2f}"),
             FixRankFact("complexity removed", str(self.ccn_removed)),
             FixRankFact("problem size", str(size)),
-            *_reach_facts(self.dependents, self.central, self.churning, self.credited),
+            *_reach_facts(self.dependents, self.central, self.credited),
+            _history_fact(self.changes, self.churning),
             FixRankFact("duplicate inside", "yes" if self.cloned else "no"),
         ]
 
@@ -561,26 +603,30 @@ def _finish_shaped(rank: _ShapeRank, **unit: Any) -> _Unit:
     return _finish(
         value=rank.value,
         cold_value=rank.cold_value,
-        worth=worth(removed(rank.ccn_removed, rank.gain), rank.credited, rank.churning),
+        worth=worth(removed(rank.ccn_removed, rank.gain), rank.credited, rank.history),
         low=rank.low,
         rank_inputs=rank.facts,
         **unit,
     )
 
 
-def _reach_facts(
-    deps: int | None, central: bool, churning: bool, credited: int | None
-) -> list[FixRankFact]:
-    """What reach and history add: importers lift the band when central,
-    churn only orders inside it. A function credited with only its share of
-    its file's importers says so."""
+def _reach_facts(deps: int | None, central: bool, credited: int | None) -> list[FixRankFact]:
+    """What reach adds: importers lift the band when central. A function
+    credited with only its share of its file's importers says so."""
     share = f", {credited} counted for its share of the file" if credited != deps else ""
     return [
         FixRankFact(
             "files that import it", f"{deps or 0}{' (top fifth)' if central else ''}{share}"
         ),
-        FixRankFact("changes often", "yes" if churning else "no"),
     ]
+
+
+def _history_fact(changes: int | None, churning: bool) -> FixRankFact:
+    """What history adds, which only orders inside the band: the function's
+    own changes, or, with no function history, whether its file changes often."""
+    if changes is None:
+        return FixRankFact("changes often", "yes" if churning else "no")
+    return FixRankFact("function changed in", text.plural(changes, "commit"))
 
 
 def _size_facts(shape: Mapping[str, int]) -> list[FixFact]:
@@ -903,6 +949,9 @@ class _RefactorPlan:
             shape,
             central,
             files.churning(path),
+            changes=files.changes(
+                path, lead.get("target_symbol"), function=lead_type in _FUNCTION_LEADS
+            ),
             cloned=function_size and files.cloned(path, shape),
             low=low_priority(marker, shape, function_size=function_size) or _above_bar(details),
             gain=gain,
@@ -974,6 +1023,7 @@ def _refactor_fields(plan: _RefactorPlan) -> dict[str, Any]:
             fallback=text.problem(plan.marker, plan.sym),
             dependents=rank.dependents,
             cloned=rank.cloned,
+            changes=rank.changes,
         ),
         "facts": _refactor_facts(plan),
         "action": _action(f"{n_steps}, {mechanical_n} mechanical", fix_steps, plan.mechanical),
@@ -1362,6 +1412,9 @@ def _finding_rank(finding: Any, files: _Files) -> _ShapeRank:
         shape,
         central,
         files.churning(path),
+        changes=files.changes(
+            path, field(finding, "function_name"), function=marker not in CLASS_MARKERS
+        ),
         cloned=sized and files.cloned(path, shape),
         low=low_priority(marker, shape, error_kind=detail_map(finding).get("kind")),
         gain=_num(field(finding, "health_impact")),
@@ -1390,6 +1443,7 @@ def _finding_unit(lead: Any, files: _Files, first: FixStep, validate: Validate |
                 measured=text.measured(where, rank.shape),
                 fallback=text.problem(marker, where),
                 cloned=rank.cloned,
+                changes=rank.changes,
             ),
             "facts": tuple(
                 [
@@ -1490,6 +1544,8 @@ def _prepare(
     plans: list[Any],
     dead_code: Rows,
     hot_cuts: tuple[float, float] | None,
+    function_changes: Mapping[str, int] | None = None,
+    blame_skipped: Iterable[str] = (),
 ) -> tuple[dict[str, tuple[list[Any], list[Any]]], _Files]:
     """Findings split into (code shape, history) by file, and the file facts."""
     split = {path: split_by_origin(rows) for path, rows in _shown_findings(findings).items()}
@@ -1501,6 +1557,8 @@ def _prepare(
         _clone_spans(plans),
         _extractions(plans),
         dead_spans(dead_code),
+        function_changes,
+        blame_skipped,
     )
     return split, files
 
@@ -1610,6 +1668,8 @@ def build_fix_first(
     symbol_lines: Mapping[str, int] | None = None,
     validate: Validate | None = None,
     judged: dict[str, Judgement] | None = None,
+    function_changes: Mapping[str, int] | None = None,
+    blame_skipped: Iterable[str] = (),
 ) -> FixFirstQueue:
     """One ranked queue of what to fix, from stored rows (shapes in the module docstring).
 
@@ -1627,10 +1687,15 @@ def build_fix_first(
     without it such an item's Verify stays unknown. ``dead_code`` rows make
     the units they cover ``unreachable``. ``judged`` is filled with every open
     refactoring opportunity's judgement, by id, for the index to store.
+    ``function_changes`` orders units inside a band by how often their
+    function changed (module docstring); without it, and in a
+    ``blame_skipped`` file, the file's churn does.
     """
     metrics = list(metrics)
     plans = list(plans)
-    split, files = _prepare(metrics, findings, plans, dead_code, hot_cuts)
+    split, files = _prepare(
+        metrics, findings, plans, dead_code, hot_cuts, function_changes, blame_skipped
+    )
     gate = _Gate(files, keep_tests=scope == "all")
     units, planned_files = _refactor_units(refactoring, plans, gate, judged)
     units += _perf_units(performance, gate, symbol_lines)
@@ -1781,4 +1846,5 @@ __all__ = [
     "hot_cut",
     "hot_cut_offset",
     "judge_findings",
+    "symbol_key",
 ]
