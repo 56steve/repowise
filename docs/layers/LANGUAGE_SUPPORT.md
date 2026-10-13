@@ -300,15 +300,16 @@ This table is why a language is Full and not Good.
 | Rust · C++ · C# | ✅ | ✅ | ✅ | no | no | ✅ | ✅ |
 | Scala · Ruby | ✅ | ✅ | ✅ | no | no | no | ✅ |
 | Kotlin | ✅ | ✅ | ✅ | no | no | no | ✅ |
-| Dart | ✅ | n/a | ✅ | no | no | no | ✅ |
+| Dart | ✅ | ✅ | ✅ | no | no | no | ✅ |
 | Object Pascal | ✅ | n/a | ✅ | n/a | n/a | no | ✅ |
 | Razor | ✅ | n/a | n/a | n/a | n/a | no | ✅ |
 | PHP | ✅ | ✅ | ✅ | no | no | no | no |
 | C | ✅ | no | no | no | no | ✅ | no |
-| F# · Objective-C | ✅ | no | no | no | no | no | no |
+| F# · Objective-C | ✅ | ✅ | no | no | no | no | no |
 | Shell | ✅ | n/a | n/a | n/a | n/a | n/a | n/a |
 
 ✅ supported, "no" not available yet, n/a the language cannot carry that metric.
+Dart, F#, and Objective-C report class size, method count, and CCN (supporting detectors like God Class), but do not compute cohesion metrics (LCOM4).
 An unmapped language produces no findings, never guessed ones. The two
 test-quality markers (mock saturation, assertion-free test) are advisory and
 never deduct from a score. Why Go and Java are held back from them, and why
