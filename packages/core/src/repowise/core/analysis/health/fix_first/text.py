@@ -16,16 +16,21 @@ from ..refactoring.render import brief
 
 TITLE_MAX = 90
 
+#: What splitting a large function or class buys. Readability and the cost
+#: of the next change, not defects: that is the claim a split can keep.
+SPLIT_GAIN = "easier to read and change once split"
+
 #: What the finding says about the code, completing "<subject> ...". The
 #: fallback when no measured fact is stored; each phrase must hold for every
 #: finding of its kind, so none claims coverage or callers it was not given.
+#: A shape a split fixes ends on what the split buys.
 PROBLEM: dict[str, str] = {
-    "brain_method": "is long, branchy and widely depended on",
-    "complex_method": "has many independent paths through it",
-    "nested_complexity": "nests its control flow deeply",
-    "bumpy_road": "repeats nested blocks side by side, a sign it does several jobs",
-    "large_method": "is long",
-    "god_class": "holds too much of its subsystem in one class",
+    "brain_method": f"is long and branchy; {SPLIT_GAIN}",
+    "complex_method": f"has many paths; {SPLIT_GAIN}",
+    "nested_complexity": f"nests deeply; {SPLIT_GAIN}",
+    "bumpy_road": f"does several jobs side by side; {SPLIT_GAIN}",
+    "large_method": f"is long; {SPLIT_GAIN}",
+    "god_class": f"holds much of its subsystem; {SPLIT_GAIN}",
     "low_cohesion": "holds groups of methods that share little state",
     "complex_conditional": "packs several boolean operators into one condition",
     "primitive_obsession": "takes a long list of parameters",
@@ -68,7 +73,7 @@ REFACTOR_TITLE: dict[str, str] = {
 }
 
 #: Appended to a why when a duplicate sits in the function being split.
-CLONED = "and part of it is duplicated, so splitting it also removes a copy"
+CLONED = "which also removes a duplicate"
 
 #: Performance causes whose cost is not a boundary call: (title, problem, gain).
 PERF_SHAPE: dict[str, tuple[str, str, str]] = {
