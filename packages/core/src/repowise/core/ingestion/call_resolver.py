@@ -42,6 +42,7 @@ from .call_receiver_typing import (
     _store_capped,
 )
 from .decorator_names import decorator_base
+from .lang_helpers.anonymous_classes import is_anonymous_member
 from .language_data import (
     get_builtin_methods,
     get_builtin_types,
@@ -65,7 +66,7 @@ from .return_types import (
     signature_parameter_count,
     signature_parameter_range,
 )
-from .symbol_identity import id_segment_name, pair_overloads, split_symbol_id
+from .symbol_identity import id_segment_name, outer_scope, pair_overloads, split_symbol_id
 from .type_names import (
     csharp_extension_receiver,
     is_resolvable_type_name,
@@ -574,24 +575,9 @@ class CallResolver(LanguageStrategiesMixin, ReceiverTypingMixin):
             decl_key = (sym.parent_name, sym.name)
             if sym.is_declaration:
                 declarations.append((path, index_id, decl_key))
-                # A declaration must never displace a definition already
-                # indexed under this name — a .cpp that forward-declares a
-                # helper above its own body holds both.
-                #
-                # A method declaration stays out: this index answers
-                # unqualified lookups from importing files, and no bare name
-                # can legally reach a method. The (class, method) index
-                # below still takes it.
-                if sym.parent_name is None:
-                    file_syms.setdefault(sym.name, index_id)
-                    top_level.setdefault(sym.name, index_id)
             else:
                 definitions[decl_key].append((path, index_id))
-                # File-level symbol index (top-level symbols and methods)
-                if sym.kind not in _EXTENSION_KINDS:
-                    file_syms[sym.name] = index_id
-                    if sym.parent_name is None:
-                        top_level[sym.name] = index_id
+            _index_bare_name(sym, index_id, file_syms, top_level)
 
             # Method index: (class_name, method_name) → symbol_id
             if sym.parent_name:
@@ -626,9 +612,8 @@ class CallResolver(LanguageStrategiesMixin, ReceiverTypingMixin):
         if _is_property_accessor(sym):
             self._property_accessor_ids.add(index_id)
         # Same rules as the per-file index, for the global-unique tier.
-        if not (sym.is_declaration and sym.parent_name is not None) and (
-            sym.kind not in _EXTENSION_KINDS
-        ):
+        bodiless_method = sym.is_declaration and sym.parent_name is not None
+        if not (bodiless_method or sym.kind in _EXTENSION_KINDS or is_anonymous_member(sym)):
             self._global_symbols[sym.name].append(index_id)
 
     def _index_overload_sets(self, parsed: ParsedFile) -> dict[str, str]:
@@ -1360,16 +1345,22 @@ class CallResolver(LanguageStrategiesMixin, ReceiverTypingMixin):
         class ``A`` would bind to class ``B``'s ``foo`` when ``B`` came later in
         the file. ``_file_methods`` carries the class. A member call on its bare
         fallback has an explicit receiver, so the caller's class is not it.
+        An anonymous class or enum-constant body (``Gson::FILTER::Filter``)
+        sees its own members first, then those of the class around it.
         """
         parsed = self._parsed_files.get(file_path)
         if parsed is None or parsed.file_info.language not in _IMPLICIT_RECEIVER_LANGUAGES:
             return None
         if call.receiver_name:
             return None
+        methods = self._file_methods.get(file_path, {})
         caller_class = _extract_class_from_symbol_id(caller_id)
-        if not caller_class:
-            return None
-        return self._file_methods.get(file_path, {}).get((caller_class, call.target_name))
+        while caller_class:
+            own = methods.get((caller_class, call.target_name))
+            if own is not None:
+                return own
+            caller_class = outer_scope(caller_class)
+        return None
 
     def _partial_fragment_member(self, file_path: str, caller_id: str, name: str) -> str | None:
         """The caller's class member *name* declared in another fragment of it.
@@ -1486,10 +1477,12 @@ class CallResolver(LanguageStrategiesMixin, ReceiverTypingMixin):
         caller_id: str,
     ) -> tuple[bool, ResolvedCall | None]:
         """Tier 1, as ``(handled, edge)``: a handled None is a refusal."""
+        own = self._enclosing_class_method(file_path, call, caller_id)
+        if self._is_anonymous_id(own):
+            return True, _own_member_call(caller_id, own, call)
         callee_id = self._file_symbols.get(file_path, {}).get(call.target_name)
         if callee_id is None:
             return False, None
-        own = self._enclosing_class_method(file_path, call, caller_id)
         if own is not None and own != callee_id and _rivals_a_class_method(callee_id):
             if own == caller_id:
                 # Recursion the flat index handed to a stranger. No edge.
@@ -1498,6 +1491,10 @@ class CallResolver(LanguageStrategiesMixin, ReceiverTypingMixin):
         if callee_id != caller_id:  # no self-recursion edges for now
             return True, ResolvedCall(caller_id, callee_id, 0.95, call.line, "same_file")
         return False, None
+
+    def _is_anonymous_id(self, sym_id: str | None) -> bool:
+        """Does *sym_id* name an anonymous class member?"""
+        return sym_id is not None and is_anonymous_member(self._symbols_by_id[sym_id])
 
     def _bound_import_call(
         self,
@@ -2168,6 +2165,44 @@ class CallResolver(LanguageStrategiesMixin, ReceiverTypingMixin):
         return names
 
 
+def _index_bare_name(
+    sym: Symbol, index_id: str, file_syms: dict[str, str], top_level: dict[str, str]
+) -> None:
+    """Index *sym* under its bare name in one file's flat and top-level tables."""
+    if sym.is_declaration:
+        # A declaration must never displace a definition already
+        # indexed under this name — a .cpp that forward-declares a
+        # helper above its own body holds both.
+        #
+        # A method declaration stays out: this index answers
+        # unqualified lookups from importing files, and no bare name
+        # can legally reach a method. The (class, method) index
+        # still takes it.
+        if sym.parent_name is None:
+            file_syms.setdefault(sym.name, index_id)
+            top_level.setdefault(sym.name, index_id)
+        return
+    if sym.kind in _EXTENSION_KINDS:
+        return
+    # Top-level symbols and methods. An anonymous class member stays out: only
+    # its own class body names it bare, through the (class, method) index. It
+    # is never top-level, so ``top_level`` needs no such check.
+    if not is_anonymous_member(sym):
+        file_syms[sym.name] = index_id
+    if sym.parent_name is None:
+        top_level[sym.name] = index_id
+
+
+def _own_member_call(caller_id: str, own: str, call: CallSite) -> ResolvedCall | None:
+    """An anonymous class body's call to its own member *own*, before any flat name.
+
+    A same-file top-level function of the name included. Recursion: no edge.
+    """
+    if own == caller_id:
+        return None
+    return ResolvedCall(caller_id, own, 0.95, call.line, "same_file")
+
+
 def _rivals_a_class_method(symbol_id: str) -> bool:
     """Another class's ordinary method — the one shape that proves last-wins.
 
@@ -2221,8 +2256,12 @@ def _extract_class_id(symbol_id: str) -> str | None:
 
 
 def _extract_class_from_symbol_id(symbol_id: str) -> str | None:
-    """Extract parent class name from a symbol ID like 'path::ClassName::method'."""
+    """The parent from a symbol ID like 'path::ClassName::method'.
+
+    Every segment between path and name, the key ``_file_methods`` uses: an
+    anonymous class or enum-constant body spans several (``Op::PLUS``).
+    """
     parts = symbol_id.split("::")
     if len(parts) >= 3:
-        return parts[-2]
+        return "::".join(parts[1:-1])
     return None

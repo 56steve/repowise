@@ -9,6 +9,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import NamedTuple, TypeVar
 
+from .lang_helpers.anonymous_classes import is_anonymous_member
 from .languages.receiver_types import (
     BINDING_LANGUAGES,
     CALL_TYPED_LANGUAGES,
@@ -468,9 +469,11 @@ class ReceiverTypingMixin:
         only a name neither binds reaches module scope. A name the body binds
         with no type it can read (`{ api -> api.m() }`) is still a local, so it
         refuses the field too. A field a repository ancestor declares is read
-        in that ancestor's file.
+        in that ancestor's file. A name an anonymous class member's body
+        neither types nor binds is asked of the function around it, whose
+        locals it captures and whose class fields it sees.
         """
-        body_types = self._declared_types_in(file_path, caller_id, language)
+        caller_id, body_types = self._typing_scope(file_path, caller_id, language, receiver_name)
         # A builtin type answers only when nothing else does, so a local
         # ``String data`` leaves ``this.data.m()``, which reaches here as
         # ``data.m()``, to the field.
@@ -767,6 +770,77 @@ class ReceiverTypingMixin:
             }
         ids = self._type_ids.get(file_path, {}).get(type_name, ())
         return ids[0] if len(ids) == 1 else None
+
+    def _capture_host(
+        self,
+        file_path: str,
+        caller_id: str,
+        language: str,
+        receiver_name: str,
+        body_types: dict[str, str | None],
+    ) -> str | None:
+        """The function to ask about a name an anonymous member neither types nor binds."""
+        host = self._capturing_function(caller_id)
+        if host is None or receiver_name in body_types:
+            return None
+        if receiver_name in self._bound_names_in(file_path, caller_id, language):
+            return None
+        return host
+
+    def _typing_scope(
+        self, file_path: str, caller_id: str, language: str, receiver_name: str
+    ) -> tuple[str, dict[str, str | None]]:
+        """The function whose body answers for *receiver_name*, with that body's types.
+
+        The caller's own, else, for an anonymous class member, out through each
+        enclosing function until one types or binds the name.
+        """
+        body_types = self._declared_types_in(file_path, caller_id, language)
+        host = self._capture_host(file_path, caller_id, language, receiver_name, body_types)
+        while host is not None:
+            body_types = self._captured_types(file_path, host, caller_id, language)
+            caller_id, host = host, self._capture_host(
+                file_path, host, language, receiver_name, body_types
+            )
+        return caller_id, body_types
+
+    def _captured_types(
+        self, file_path: str, host: str, caller_id: str, language: str
+    ) -> dict[str, str | None]:
+        """``{name: type}`` for the *host* locals its anonymous member *caller_id* sees.
+
+        Those declared above the member, outside every symbol nested in the
+        host, such as another anonymous class's method. A lambda is no symbol,
+        so its locals still read as the host's, as they do for the host's own
+        calls.
+        """
+        spans = self._spans_for(file_path)
+        start, end = spans[host][0], spans[caller_id][0] - 1
+        nested = merge_spans(
+            span for sym_id, span in spans.items() if sym_id != host and start < span[0] <= end
+        )
+        declarations = tuple(
+            d for d in self._declarations_for(file_path, language) if not in_spans(nested, d.line)
+        )
+        return types_in_span(declarations, start, end)
+
+    def _capturing_function(self, caller_id: str) -> str | None:
+        """The function an anonymous class member *caller_id* is declared in.
+
+        Found by walking up the member's id to the first symbol. A class there
+        (a field initializer's anonymous class) or an overloaded function,
+        whose id carries a signature the holder segment does not, answers None.
+        """
+        caller = self._symbols_by_id.get(caller_id)
+        if caller is None or not is_anonymous_member(caller):
+            return None
+        scope = _enclosing_id(caller_id)
+        while "::" in scope:
+            scope = _enclosing_id(scope)
+            holder = self._symbols_by_id.get(scope)
+            if holder is not None:
+                return scope if holder.kind in _FUNCTION_KINDS else None
+        return None
 
     def _caller_class_id(self, caller_id: str) -> str:
         """The id of the type whose method *caller_id* is.
