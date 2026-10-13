@@ -12,7 +12,8 @@ from pathlib import Path
 from typing import Any
 
 from ....ingestion.external_systems.maven_model import load_maven_reactor
-from ....ingestion.package_roots import owning_package
+from ....ingestion.package_roots import module_for, owning_package
+from ....ingestion.resolvers.dotnet.msbuild import MSBuildProject, parse_csproj
 from ....ingestion.resolvers.jvm_gradle import parse_settings
 from ....ingestion.workspace_members import (
     declared_workspace_members,
@@ -36,6 +37,8 @@ JsPackages = Mapping[str, str | None]
 #: for a runner that keeps only its last such flag. A test the map does not hold
 #: gets no command.
 TestRuns = Mapping[str, Sequence[str | None]]
+
+_SOLUTIONS = (".sln", ".slnx")
 
 
 def _file(test: str) -> str:
@@ -82,6 +85,10 @@ class _Checkout:
         return owning_package(
             path, self.manifests, name, accepts or (lambda directory: self.has(directory, name))
         )
+
+    @cached_property
+    def dotnet(self) -> _DotnetLayout:
+        return _dotnet_layout(self.root, self.manifests)
 
     @cached_property
     def cargo_members(self) -> set[str]:
@@ -138,6 +145,141 @@ def js_test_packages(
         path: repo.owner(path, "package.json", accepts)
         for path in {_file(test) for test in tests if _is_js(test)}
     }
+
+
+#: NuGet ids that make a project a test project: the test SDK and each
+#: framework's runner.
+_TEST_PACKAGES = frozenset(
+    {
+        "microsoft.net.test.sdk",
+        "mstest",
+        "mstest.testadapter",
+        "nunit3testadapter",
+        "tunit",
+        "xunit",
+        "xunit.runner.visualstudio",
+        "xunit.v3",
+        "xunit.v3.mtp-v1",
+        "xunit.v3.mtp-v2",
+    }
+)
+#: MSBuild files every project below their directory imports.
+_SHARED_BUILD_FILES = ("Directory.Build.props", "Directory.Build.targets")
+#: The .NET test project naming convention (``Shop.Tests``, ``Shop.UnitTests``,
+#: ``Shop.Test``, ``Shop.Specs``).
+_TEST_PROJECT_NAME = re.compile(r"(Tests|\.Test|\.Specs)$", re.IGNORECASE)
+
+
+def _declares_tests(is_test_project: bool, packages: Iterable[str]) -> bool:
+    return is_test_project or not _TEST_PACKAGES.isdisjoint(p.lower() for p in packages)
+
+
+def _shared_declares_tests(root: Path, directory: str, seen: dict[str, bool]) -> bool:
+    """Whether a ``Directory.Build`` file in *directory* declares tests outside
+    any ``Condition``, each directory read once per call (*seen*)."""
+    if directory not in seen:
+        parsed = [
+            parse_csproj(root / directory / name)
+            for name in _SHARED_BUILD_FILES
+            if (root / directory / name).is_file()
+        ]
+        seen[directory] = any(
+            _declares_tests(p.is_test_project, p.unconditional_package_references)
+            for p in parsed
+            if p is not None
+        )
+    return seen[directory]
+
+
+def _declared_test_project(
+    root: Path, project: str, parsed: MSBuildProject, seen: dict[str, bool]
+) -> bool:
+    """Whether *project* (*parsed*) says it runs tests, itself or through a
+    shared build file on its path from the repository root."""
+    if _declares_tests(parsed.is_test_project, parsed.package_references):
+        return True
+    parts = project.split("/")[:-1]
+    return any(
+        _shared_declares_tests(root, "/".join(parts[:i]), seen) for i in range(len(parts) + 1)
+    )
+
+
+def _project_graph(root: Path, projects: list[str]) -> tuple[dict[str, set[str]], set[str]]:
+    """Over *projects* (repo-relative ``.csproj`` paths): each referenced one
+    mapped to the projects whose ``ProjectReference`` names it, and the
+    projects that declare tests (:func:`_declared_test_project`).
+    Ceiling: one parse per project and shared build file, per call."""
+    by_path = {(root / project).resolve(): project for project in projects}
+    referrers: dict[str, set[str]] = {}
+    declared: set[str] = set()
+    seen: dict[str, bool] = {}
+    for project in projects:
+        parsed = parse_csproj(root / project)
+        if parsed is None:
+            continue
+        if _declared_test_project(root, project, parsed, seen):
+            declared.add(project)
+        for target in parsed.project_references:
+            if target in by_path:
+                referrers.setdefault(by_path[target], set()).add(project)
+    return referrers, declared
+
+
+def _root_files(root: Path) -> tuple[list[str], str | None]:
+    """The ``.csproj`` files at the repository root, which the package scan
+    leaves out, and its solution: the only one, or the one named after the
+    checkout; None when there is none or the choice is a guess."""
+    try:
+        names = sorted(p.name for p in root.iterdir())
+    except OSError:
+        return [], None
+    projects = [name for name in names if name.lower().endswith(".csproj")]
+    solutions = [name for name in names if Path(name).suffix.lower() in _SOLUTIONS]
+    if len(solutions) > 1:
+        solutions = [name for name in solutions if Path(name).stem.lower() == root.name.lower()]
+    return projects, solutions[0] if len(solutions) == 1 else None
+
+
+def _test_project(path: str, layout: _DotnetLayout) -> str | None:
+    """The test project that runs C# file *path*: the one project in its
+    directory (the root's when no deeper one holds it) when it declares tests
+    or is named as a test project, else the only project declaring tests that
+    references it (*path* is in a test helper library); None otherwise. An app
+    or library with neither signal runs no tests."""
+    by_dir = layout.by_dir
+    owner = module_for(path, by_dir.keys())
+    projects = by_dir.get(owner, []) if owner in by_dir else by_dir.get("", [])
+    if len(projects) != 1:
+        return None
+    if projects[0] in layout.test_projects or _TEST_PROJECT_NAME.search(Path(projects[0]).stem):
+        return projects[0]
+    users = [u for u in layout.referrers.get(projects[0], ()) if u in layout.test_projects]
+    return users[0] if len(users) == 1 else None
+
+
+@dataclass(frozen=True)
+class _DotnetLayout:
+    """A checkout's C# projects (``by_dir``: directory to ``.csproj`` paths,
+    ``""`` for the root), who references whom, the test projects, and the
+    root solution."""
+
+    by_dir: dict[str, list[str]]
+    referrers: dict[str, set[str]]
+    test_projects: set[str]
+    solution: str | None
+
+
+def _dotnet_layout(root: Path, manifests: Mapping[str, frozenset[str]]) -> _DotnetLayout:
+    """The layout from the ``.csproj`` names *manifests* (the package scan)
+    records, plus the root's own files, which the scan leaves out."""
+    root_projects, solution = _root_files(root)
+    by_dir: dict[str, list[str]] = {"": root_projects} if root_projects else {}
+    for directory, names in manifests.items():
+        for name in sorted(names):
+            if name.lower().endswith(".csproj"):
+                by_dir.setdefault(directory, []).append(f"{directory}/{name}")
+    referrers, test_projects = _project_graph(root, [p for ps in by_dir.values() for p in ps])
+    return _DotnetLayout(by_dir, referrers, test_projects, solution)
 
 
 def plan_packages(tests: Iterable[str], packages: JsPackages | None) -> dict[str, str | None]:
@@ -292,6 +434,27 @@ def _ruby_run(repo: _Checkout, test: str) -> Run | None:
     return None
 
 
+def _dotnet_filter(test: str) -> str | None:
+    """``Class.Method`` for a ``file::...::Class::Method`` id: a substring of
+    the test's fully qualified name, so a namespace or an outer class in front
+    still matches. None for a file, or a name the filter syntax would misread."""
+    name = ".".join(test.split("::")[1:][-2:])
+    return name if re.fullmatch(r"\w+(\.\w+)?", name) else None
+
+
+def _dotnet_run(repo: _Checkout, test: str) -> Run | None:
+    """``dotnet test`` on the test project holding the test (else the root
+    solution), filtered to the named test. Coverage collection is off: a
+    coverage gate (coverlet's threshold) fails any filtered run."""
+    project = _test_project(_file(test), repo.dotnet) or repo.dotnet.solution
+    if project is None:
+        return None
+    name = _dotnet_filter(test)
+    return f"dotnet test {_arg(project)} -p:CollectCoverage=false", (
+        f"--filter={name}" if name else None
+    )
+
+
 #: Test-file suffixes and the function naming the run, per language whose
 #: runner works per package. A runner gets the whole test id, ``::`` name
 #: included, so one that can select a single test can narrow to it.
@@ -300,6 +463,7 @@ _RUNNERS: tuple[tuple[tuple[str, ...], Callable[[_Checkout, str], Run | None]], 
     ((".rs",), _rust_run),
     ((".java", ".kt"), _jvm_run),
     ((".rb",), _ruby_run),
+    ((".cs",), _dotnet_run),
 )
 
 
@@ -394,8 +558,8 @@ def commands_for_tests(
     its tests: with none found, a bare ``pytest`` or ``npm test`` would run a
     whole suite as if it guarded the change. A JS/TS test runs from the package
     whose ``test`` script owns it (*packages*), with its path relative to that
-    package; a test no package.json can run gets no command. A Go, Rust, JVM or
-    Ruby test runs its package, or the narrower target *runs* names for it. Any
+    package; a test no package.json can run gets no command. A Go, Rust, JVM,
+    Ruby or C# test runs its package, or the narrower target *runs* names for it. Any
     other test, or one *runs* does not hold, gets none in place of a guess that
     would fail when run.
     """
