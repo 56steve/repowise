@@ -1091,20 +1091,14 @@ def _staged_title(sym: str, stages: int) -> str:
 
 def _span_title(plan: _RefactorPlan, lead_plan: Any) -> str:
     start, end = _span(lead_plan)
-    # With no suggested name the title drops "into ...": the step already says
-    # to name the helper for what the lines do, and a title never reads "<name>".
-    name = _plan_body(lead_plan).get("suggested_name") or ""
+    # Titles never quote the helper name: it is a placeholder the step asks to rename.
     spanned = plan.lead_type == "extract_method" and bool(start and end)
     if spanned and magnitude(plan.rank.shape) >= SIZE_BREAK_UP:
-        return _break_up_title(plan.sym, plan.rank.shape, f"{start}-{end}", name)
+        return _break_up_title(plan.sym, plan.rank.shape, f"{start}-{end}")
     template = text.REFACTOR_TITLE.get(
         "extract_method_span" if spanned else plan.lead_type, "Refactor {file}"
     )
-    if not name:
-        template = template.replace(" into {name}", "")
-    title = template.format(
-        sym=plan.sym, file=text.basename(plan.path), start=start, end=end, name=name
-    )
+    title = template.format(sym=plan.sym, file=text.basename(plan.path), start=start, end=end)
     return _with_more_steps(plan, title)
 
 
@@ -1114,18 +1108,11 @@ def _with_more_steps(plan: _RefactorPlan, title: str) -> str:
     return title
 
 
-def _break_up_title(
-    sym: str, shape: Mapping[str, int], span: str, name: str, suffix: str = ""
-) -> str:
-    # The helper's signature is in the step; the title keeps its name, or
-    # drops it when the problem, the span and the suffix fill the line.
+def _break_up_title(sym: str, shape: Mapping[str, int], span: str, suffix: str = "") -> str:
     title = f"Start breaking up {sym} ({text.size_brief(shape)}): first lift lines {span}"
-    into = f" into {name}" if name else ""
-    if not suffix:
-        return title + into if len(title + into) <= text.TITLE_MAX else title
     # A caveat outranks the span and the size, which the step and why name anyway.
     head = f"Start breaking up {sym}"
-    for candidate in (title + into, title, f"{head} ({text.size_brief(shape)})", head):
+    for candidate in (title, f"{head} ({text.size_brief(shape)})", head):
         if len(candidate + suffix) <= text.TITLE_MAX:
             return candidate + suffix
     return head + suffix
@@ -1544,8 +1531,7 @@ def _led_title(where: str, shape: Mapping[str, int], plan: Any) -> str:
     if stages:
         return _staged_title(where, stages) + suffix
     start, end = _span(plan)
-    name = body.get("suggested_name") or ""
-    return _break_up_title(where, shape, f"{start}-{end}", name, suffix)
+    return _break_up_title(where, shape, f"{start}-{end}", suffix)
 
 
 def _finding_plan_fields(led: Any, path: str, finding_id: str | None) -> dict[str, Any]:

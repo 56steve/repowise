@@ -94,7 +94,7 @@ def test_history_never_leads_and_rides_along_as_context() -> None:
 def test_text_quotes_the_stored_numbers() -> None:
     core = next(i for i in _build().items if i.kind == "refactor")
     assert core.title == (
-        "Start breaking up run (CCN 44, 50 lines): first lift lines 20-35 into sum_rows"
+        "Start breaking up run (CCN 44, 50 lines): first lift lines 20-35"
     )
     # The size is a fact; the why says why it matters here.
     assert core.why == (
@@ -214,7 +214,7 @@ def test_value_leads_tier_and_a_huge_function_says_so() -> None:
     big = {**FINDINGS[1], "details": {"ccn": 120, "nloc": 900, "max_nesting": 6}}
     planned = _build(findings=[big], performance=[]).lead
     assert planned.title == (
-        "Start breaking up run (CCN 120, 900 lines): first lift lines 20-35 into sum_rows"
+        "Start breaking up run (CCN 120, 900 lines): first lift lines 20-35"
     )
 
 
@@ -447,7 +447,7 @@ def test_malformed_stages_never_crash_or_say_one_helper(stages, orchestrator) ->
 def test_an_unstaged_plan_reads_as_before() -> None:
     core = next(i for i in _build().items if i.kind == "refactor")
     assert core.title == (
-        "Start breaking up run (CCN 44, 50 lines): first lift lines 20-35 into sum_rows"
+        "Start breaking up run (CCN 44, 50 lines): first lift lines 20-35"
     )
     assert core.action.steps[0].text == "Extract lines 20-35 of run into sum_rows(rows, limit) -> total"
 
@@ -575,7 +575,7 @@ def test_a_finding_whose_plan_is_below_the_worth_floor_leads_with_that_plan() ->
     run = next(i for i in queue.items if i.target.symbol == "run")
     assert queue.totals.excluded["below_min_worth"] == 1 and run.kind == "finding"
     assert run.title == (
-        "Start breaking up run (CCN 44, 50 lines): first lift lines 20-35 into sum_rows"
+        "Start breaking up run (CCN 44, 50 lines): first lift lines 20-35"
     )
     assert run.action.steps[0].text == (
         "Extract lines 20-35 of run into sum_rows(rows, limit) -> total"
