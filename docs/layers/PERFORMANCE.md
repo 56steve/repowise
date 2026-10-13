@@ -87,7 +87,10 @@ Everything else is counted by reason, not hidden:
 | `cold_role` | Only startup, a CLI command, tooling, tests or client UI code run the loop, so no server pays it per request |
 | `background_unproven` | A scheduled job runs the loop and nothing shows it grows with the data; listed under `proof=background_unproven` |
 
-To see them, widen the filter (below). Performance work also appears in
+To see them, widen the filter (below). Each performance finding also stores the reason its cause is in or out of the queue.
+Code in a package path that only looks like an example tree (`com/example/...`) is judged as production when the index read it as production.
+
+Performance work also appears in
 [Fix first](CODE_HEALTH.md#fix-first), where it competes with other kinds of work.
 
 ## Reading it
