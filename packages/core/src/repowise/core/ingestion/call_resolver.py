@@ -64,7 +64,7 @@ from .return_types import (
     signature_parameter_count,
     signature_parameter_range,
 )
-from .symbol_identity import id_segment_name, split_symbol_id
+from .symbol_identity import id_segment_name, pair_overloads, split_symbol_id
 from .type_names import (
     csharp_extension_receiver,
     is_resolvable_type_name,
@@ -610,7 +610,7 @@ class CallResolver(LanguageStrategiesMixin, ReceiverTypingMixin):
         members: dict[str, list[Symbol]] = defaultdict(list)
         for sym in parsed.symbols:
             base, payload = split_symbol_id(sym.id)
-            if payload is not None and payload.isdigit():
+            if payload is not None and payload[0].isdigit():
                 members[base].append(sym)
         representatives: dict[str, str] = {}
         for overloads in members.values():
@@ -630,27 +630,49 @@ class CallResolver(LanguageStrategiesMixin, ReceiverTypingMixin):
         """Pair each member of a declared overload set with its definition.
 
         ``_link_declarations`` pairs a declared set with a defined one by their
-        representatives; the other members pair here by parameter count, so
-        each declaration records its definition. The definition also admits
+        representatives; the members pair here by parameter count and types
+        (``pair_overloads``), so each declaration records its definition, even
+        when the source defines one plain-id member. The definition also admits
         the defaults its declaration writes: C++ writes them on the header
         declaration only, so ``f(int, int)`` alone would refuse the one-argument
         call ``f(int, int = 0)`` admits.
         """
+        symbols = self._symbols_by_id
         for declared, defined in list(self._decl_to_def.items()):
             declared_members = self._overload_members.get(declared, ())
+            if not declared_members:
+                continue
             defined_members = self._overload_members.get(defined, ())
-            by_count = {split_symbol_id(member)[1]: member for member, _ in defined_members}
-            floors: dict[str, int] = {}
-            for member, (fewest, _most) in declared_members:
-                target = by_count.get(split_symbol_id(member)[1])
-                if target is not None:
-                    self._decl_to_def.setdefault(member, target)
-                    floors[target] = min(fewest, floors.get(target, fewest))
-            if floors:
-                self._overload_members[defined] = tuple(
-                    (member, (min(fewest, floors.get(member, fewest)), most))
-                    for member, (fewest, most) in defined_members
-                )
+            pairs = pair_overloads(
+                [symbols[member] for member, _ in declared_members],
+                [symbols[member] for member, _ in defined_members] or [symbols[defined]],
+            )
+            for member, target in pairs.items():
+                self._decl_to_def[member] = target
+            # The representative was linked by name alone; a definition its own
+            # signature does not reach belongs to another member.
+            if pairs and declared not in pairs:
+                del self._decl_to_def[declared]
+            if defined_members:
+                self._carry_declared_floors(defined, declared_members, pairs)
+
+    def _carry_declared_floors(
+        self,
+        defined: str,
+        declared_members: tuple[tuple[str, tuple[int, int | None]], ...],
+        pairs: dict[str, str],
+    ) -> None:
+        """Lower each paired definition's fewest arguments to its declaration's."""
+        floors: dict[str, int] = {}
+        for member, (fewest, _most) in declared_members:
+            target = pairs.get(member)
+            if target is not None:
+                floors[target] = min(fewest, floors.get(target, fewest))
+        if floors:
+            self._overload_members[defined] = tuple(
+                (member, (min(fewest, floors.get(member, fewest)), most))
+                for member, (fewest, most) in self._overload_members[defined]
+            )
 
     def _index_extension_methods(
         self, candidates: dict[tuple[str, str], set[tuple[str, str]]]

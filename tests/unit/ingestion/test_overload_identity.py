@@ -7,9 +7,13 @@ colliding member now carries a discriminator, ``#<parameter count>``, and a C#
 generic type beside a same-named one carries its arity, ``IFoo`1``. Calls narrow
 to the member their argument count names.
 
-The controls: a name declared once keeps its plain id, two overloads of one
-arity stay one node, and a language without a registered discriminator is
-untouched.
+Overloads of one arity also carry their erased parameter types,
+``put#1(String)``. A Java enum constant's body methods sit under the constant,
+``Op::PLUS::apply``.
+
+The controls: a name declared once keeps its plain id, members equal in count
+and types (a C++ declaration and its definition) stay one node, and a language
+without a registered discriminator is untouched.
 """
 
 from __future__ import annotations
@@ -26,10 +30,13 @@ from repowise.core.ingestion.models import FileInfo, ParsedFile
 from repowise.core.ingestion.parser import ASTParser
 from repowise.core.ingestion.return_types import signature_parameter_range
 from repowise.core.ingestion.symbol_identity import (
+    _erased_parameter_type,
     base_symbol_id,
     id_segment_name,
     overload_sets,
     split_symbol_id,
+    symbol_id_arity,
+    untyped_symbol_id,
 )
 from repowise.core.ingestion.traverser import FileTraverser
 from repowise.core.ingestion.type_names import type_argument_count
@@ -205,18 +212,99 @@ class TestJavaOverloads:
         once = next(s for s in parsed.symbols if s.name == "once")
         assert once.signature == "once() -> void"
 
-    def test_two_overloads_of_one_arity_stay_one_node_and_the_first_keeps_it(self) -> None:
+    def test_overloads_of_one_arity_split_by_erased_parameter_types(self) -> None:
         text = (
             "public class P {\n"
             "  public void put(String k) { }\n"
             "  public void put(int k) { }\n"
-            "  public void put(String k, int v) { }\n"
+            "  public void put(final java.util.Map<String, Integer> m, @Nullable Object... rest) { }\n"
+            "  public void put(char k[], long v) { }\n"
+            "  public void put(String k, int v, int w) { }\n"
             "}\n"
         )
         graph = _graph({"P.java": ("java", text)})
-        node = graph.nodes["P.java::P::put#1"]
-        assert (node["start_line"], node["signature"]) == (2, "put(String k) -> void")
-        assert "P.java::P::put#2" in graph
+        node = graph.nodes["P.java::P::put#1(int)"]
+        assert (node["start_line"], node["signature"]) == (3, "put(int k) -> void")
+        assert {
+            "P.java::P::put#1(String)",
+            # Varargs read as the array they are: no ``.`` in an id payload.
+            "P.java::P::put#2(Map,Object[])",
+            "P.java::P::put#2(char[],long)",
+            # A count no sibling shares keeps the bare count.
+            "P.java::P::put#3",
+        } <= set(graph)
+        assert split_symbol_id("P.java::P::put#2(char[],long)") == ("P.java::P::put", "2(char[],long)")
+        assert symbol_id_arity("P.java::P::put#2(char[],long)") == "2"
+        assert id_segment_name("put#2(char[],long)") == "put"
+        assert bare_name("P.java::P::put#2(Map,Object[])") == "put"
+        assert untyped_symbol_id("P.java::P::put#2(char[],long)") == "P.java::P::put#2"
+
+    @pytest.mark.parametrize(
+        ("parameter", "erased"),
+        [
+            ("Object... rest", "Object[]"),
+            ("final java.util.Map<String, Integer> m", "Map"),
+            ("void (*cb)(int, int)", "void*fn"),
+            ("int (&row)[4]", "int&fn"),
+            ("...", "[]"),
+            ("Args&&... args", "Args&&[]"),
+            ("const std::vector<ns::T*>& v", "vector*&"),
+            ("@a.b.C(x = \"/p.q\") String s", "String"),
+            ("unsigned long n", "unsigned_long"),
+        ],
+    )
+    def test_an_erased_parameter_type_never_holds_a_name_separator(
+        self, parameter: str, erased: str
+    ) -> None:
+        got = _erased_parameter_type(parameter)
+        assert got == erased
+        assert not any(sep in got for sep in (".", "/", "::", "(", ")", "#"))
+
+    def test_an_inserted_overload_renames_no_sibling(self) -> None:
+        body = "  void put(String k) { }\n  void put(int k) { }\n"
+        before = set(_ids(_parse("P.java", "java", "class P {\n" + body + "}\n")))
+        after = set(_ids(_parse("P.java", "java", "class P {\n  void put(long k) { }\n" + body + "}\n")))
+        assert before < after
+
+    def test_enum_constant_bodies_get_their_own_methods(self, tmp_path: Path) -> None:
+        text = (
+            "public enum Op {\n"
+            "  PLUS { int apply(int a, int b) { return a + b; } },\n"
+            "  MINUS { int apply(int a, int b) { return negate(b) + a; } };\n"
+            "  abstract int apply(int a, int b);\n"
+            "  static int negate(int x) { return -x; }\n"
+            "}\n"
+        )
+        by_id = {s.id: s for s in _parse("Op.java", "java", text).symbols}
+        assert {"Op.java::Op::PLUS::apply", "Op.java::Op::MINUS::apply", "Op.java::Op::apply"} <= set(by_id)
+        assert by_id["Op.java::Op::MINUS::apply"].qualified_name == "Op.Op.MINUS.apply"
+        # The enum stays the owner: its node holds every constant's method.
+        assert by_id["Op.java::Op::MINUS::apply"].parent_name == "Op"
+        graph = _graph({"Op.java": ("java", text)})
+        assert graph.has_edge("Op.java::Op", "Op.java::Op::PLUS::apply")
+        assert graph["Op.java::Op"]["Op.java::Op::PLUS::apply"]["edge_type"] == "has_method"
+        edges = _edges(tmp_path, {"Op.java": ("java", text)})
+        assert ("Op.java::Op::MINUS::apply", "Op.java::Op::negate") in edges
+
+    def test_a_same_arity_call_keeps_the_representative_and_callers_keep_their_ids(
+        self, tmp_path: Path
+    ) -> None:
+        text = (
+            "public class S {\n"
+            "  public S append(String s) { return emit(s); }\n"
+            "  public S append(char c) { return emit(String.valueOf(c)); }\n"
+            "  S emit(String s) { return this; }\n"
+            "  void use() { append('x'); }\n"
+            "}\n"
+        )
+        edges = _edges(tmp_path, {"S.java": ("java", text)})
+        base = "S.java::S::"
+        # Each overload's own call is attributed to its own node.
+        assert (base + "append#1(String)", base + "emit") in edges
+        assert (base + "append#1(char)", base + "emit") in edges
+        # A count cannot choose between them: the set's representative, the
+        # first declared, answers, as the shared node did before.
+        assert {c for a, c in edges if a == base + "use"} == {base + "append#1(String)"}
 
     def test_a_record_keeps_its_canonical_constructor_beside_an_overload(self) -> None:
         text = (
@@ -333,6 +421,18 @@ class TestCSharpGenericSiblings:
         assert ("C.cs::C::Two", "H.cs::H::Sum#3") in edges
         assert ("C.cs::C::Four", "H.cs::H::Sum#2") in edges
 
+    def test_csharp_same_arity_constructors_get_their_own_nodes(self) -> None:
+        text = (
+            "namespace App;\npublic class P {\n"
+            "  public P(string name) { }\n"
+            "  public P(TimeSpan? delay) { }\n"
+            "  public P(int[] ids) { }\n"
+            "  public P() { }\n"
+            "}\n"
+        )
+        ids = set(_ids(_parse("P.cs", "csharp", text)))
+        assert {"P.cs::P::P#1(string)", "P.cs::P::P#1(TimeSpan?)", "P.cs::P::P#1(int[])", "P.cs::P::P#0"} <= ids
+
 
 SHAPES_H = """namespace geo {
 class Shape {
@@ -370,8 +470,8 @@ class TestCppOverloads:
         ids = set(_ids(_parse("shapes.h", "cpp", SHAPES_H)))
         base = "shapes.h::Shape::"
         assert {base + "Shape#0", base + "Shape#2", base + "scale#1", base + "scale#2"} <= ids
-        # Same arity stays one id: template overloads and const overloads.
-        assert {base + "put", base + "area"} <= ids
+        # Same arity splits by parameter type; const overloads erase alike.
+        assert {base + "put#1(T)", base + "put#1(T*)", base + "area"} <= ids
         assert base + "once" in ids
 
     def test_an_in_class_declaration_and_its_inline_definition_share_an_id(self) -> None:
@@ -420,6 +520,33 @@ class TestCppOverloads:
         assert graph.nodes["util.h::pad#1"]["defined_by"] == "util.cpp::pad#1"
         assert graph.nodes["util.h::pad#3"]["defined_by"] == "util.cpp::pad#3"
         assert graph.has_edge("main.cpp::main", "util.cpp::pad#3")
+
+    @pytest.mark.parametrize("header_first", [True, False])
+    def test_a_member_pairs_with_a_plain_id_definition(self, tmp_path: Path, header_first: bool) -> None:
+        decls = ["int f(int a);", "int f(long a);"]
+        if not header_first:
+            decls.reverse()
+        (tmp_path / "f.h").write_text("\n".join(decls) + "\n")
+        (tmp_path / "f.cpp").write_text('#include "f.h"\nint f(int x) { return x; }\n')
+        graph = self._build(tmp_path)
+        assert graph.nodes["f.h::f#1(int)"]["defined_by"] == "f.cpp::f"
+        assert not graph.nodes["f.h::f#1(long)"].get("defined_by")
+
+    def test_a_type_spelled_two_ways_pairs_by_count(self, tmp_path: Path) -> None:
+        (tmp_path / "g.h").write_text("int g(int a);\nint g(size_t n);\n")
+        (tmp_path / "g.cpp").write_text(
+            '#include "g.h"\nint g(int a) { return a; }\nint g(unsigned long n) { return 0; }\n'
+        )
+        graph = self._build(tmp_path)
+        assert graph.nodes["g.h::g#1(int)"]["defined_by"] == "g.cpp::g#1(int)"
+        assert graph.nodes["g.h::g#1(size_t)"]["defined_by"] == "g.cpp::g#1(unsigned_long)"
+
+    @staticmethod
+    def _build(root: Path):
+        builder = GraphBuilder(repo_path=root)
+        for info in FileTraverser(root).traverse():
+            builder.add_file(_PARSER.parse_file(info, Path(info.abs_path).read_bytes()))
+        return builder.build()
 
     def test_a_set_split_between_header_and_source_keeps_its_pairing(self, tmp_path: Path) -> None:
         """One overload inline in the header, one in the .cpp: the .cpp body takes the call."""

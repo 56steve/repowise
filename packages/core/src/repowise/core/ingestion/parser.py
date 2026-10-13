@@ -1370,6 +1370,35 @@ def _parse_tree(
     return root, parse_errors, grammar_tag, language
 
 
+def _parent_type_name(ancestor: Node, src: str) -> str | None:
+    """The name a class/impl ancestor gives its members, without type arguments."""
+    name_node = ancestor.child_by_field_name("name") or (
+        ancestor.child_by_field_name("type")  # Rust impl_item
+    )
+    if name_node is None:
+        return None
+    # For Rust impl blocks with generic types (e.g. impl<T> Foo<T>),
+    # extract only the base type name, not the full generic signature.
+    if name_node.type in ("generic_type", "scoped_type_identifier"):
+        inner = name_node.child_by_field_name(
+            "type" if name_node.type == "generic_type" else "name"
+        )
+        if inner and inner.type == "type_identifier":
+            name_node = inner
+    return _node_text(name_node, src)
+
+
+def _java_enum_constant(def_node: Node, config: LanguageConfig, src: str) -> str | None:
+    """The enum constant whose body declares *def_node*, before any enclosing type."""
+    ancestor = def_node.parent
+    while ancestor is not None and ancestor.type not in config.parent_class_types:
+        if ancestor.type == "enum_constant":
+            name = ancestor.child_by_field_name("name")
+            return _node_text(name, src) if name else None
+        ancestor = ancestor.parent
+    return None
+
+
 class ASTParser:
     """Unified AST parser — works for all languages via .scm query files.
 
@@ -1728,15 +1757,15 @@ class ASTParser:
 
         params_nodes = capture_dict.get("symbol.params", [])
         params_text = _node_text(params_nodes[0], src) if params_nodes else ""
-        sym_id = (
-            f"{file_info.path}::{parent_name}::{name}"
-            if parent_name
-            else f"{file_info.path}::{name}"
-        )
+        # The id scope adds a Java enum constant to its parent, so each
+        # constant's override is its own node while the enum stays its owner.
+        constant = _java_enum_constant(def_node, config, src) if language == "java" else None
+        scope = f"{parent_name}::{constant}" if parent_name and constant else parent_name
+        sym_id = f"{file_info.path}::{scope}::{name}" if scope else f"{file_info.path}::{name}"
         symbol = Symbol(
             id=sym_id,
             name=name,
-            qualified_name=_build_qualified_name(file_info.path, parent_name, name),
+            qualified_name=_build_qualified_name(file_info.path, scope, name),
             kind=kind,  # type: ignore[arg-type]
             signature=build_signature(node_type, name, params_text, def_node, src),
             start_line=start_line,
@@ -1861,21 +1890,9 @@ class ASTParser:
             ancestor = def_node.parent
             while ancestor is not None:
                 if ancestor.type in config.parent_class_types:
-                    name_node = ancestor.child_by_field_name("name") or (
-                        ancestor.child_by_field_name("type")  # Rust impl_item
-                    )
-                    if name_node:
-                        # For Rust impl blocks with generic types (e.g. impl<T> Foo<T>),
-                        # extract only the base type name, not the full generic signature.
-                        if name_node.type == "generic_type":
-                            inner = name_node.child_by_field_name("type")
-                            if inner and inner.type == "type_identifier":
-                                name_node = inner
-                        elif name_node.type == "scoped_type_identifier":
-                            inner = name_node.child_by_field_name("name")
-                            if inner and inner.type == "type_identifier":
-                                name_node = inner
-                        return _node_text(name_node, src)
+                    name = _parent_type_name(ancestor, src)
+                    if name is not None:
+                        return name
                 ancestor = ancestor.parent
             return None
 
