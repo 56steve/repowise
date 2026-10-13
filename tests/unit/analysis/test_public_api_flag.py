@@ -23,6 +23,67 @@ _REPO = {
     "lib/lib/store/disk.py": "class Store:\n    pass\n",
     "lib/lib/hidden/__init__.py": "from .impl import helper\n",
     "lib/lib/hidden/impl.py": "def helper():\n    pass\n",
+    "lazy/pyproject.toml": '[project]\nname = "lazy"\n',
+    "lazy/lazy/__init__.py": (
+        "__all__ = ['extract', 'missing']\n"
+        "_LAZY: dict[str, tuple[str, str]] = {\n"
+        "    'extract': ('.extract', 'extract'),\n"
+        "    'missing': ('.missing', 'missing'),\n"
+        "}\n\n"
+        "def __getattr__(name):\n"
+        "    if name in _LAZY:\n"
+        "        module_name, attr = _LAZY[name]\n"
+        "        return getattr(importlib.import_module(module_name, __name__), attr)\n"
+        "    raise AttributeError(name)\n"
+    ),
+    "lazy/lazy/extract.py": "def extract():\n    pass\n",
+    "local/pyproject.toml": '[project]\nname = "local"\n',
+    "local/local/__init__.py": (
+        "def __getattr__(name):\n"
+        "    lazy = {'extract': ('local.extract', 'extract')}\n"
+        "    if name in lazy:\n"
+        "        module_name, attr = lazy[name]\n"
+        "        return getattr(importlib.import_module(module_name, __name__), attr)\n"
+        "    raise AttributeError(name)\n"
+    ),
+    "local/local/extract.py": "def extract():\n    pass\n",
+    "computed/pyproject.toml": '[project]\nname = "computed"\n',
+    "computed/computed/__init__.py": (
+        "__all__ = ['extract']\n"
+        "_NAMES = ['extract']\n"
+        "_LAZY = {name: ('.extract', name) for name in _NAMES}\n\n"
+        "def __getattr__(name):\n"
+        "    if name in _LAZY:\n"
+        "        module_name, attr = _LAZY[name]\n"
+        "        return getattr(importlib.import_module(module_name, __name__), attr)\n"
+        "    raise AttributeError(name)\n"
+    ),
+    "computed/computed/extract.py": "def extract():\n    pass\n",
+    "shadow/pyproject.toml": '[project]\nname = "shadow"\n',
+    "shadow/shadow/__init__.py": (
+        "__all__ = ['Client']\n"
+        "from .eager import Client\n"
+        "_LAZY = {'Client': ('.lazy', 'Client')}\n\n"
+        "def __getattr__(name):\n"
+        "    if name in _LAZY:\n"
+        "        module_name, attr = _LAZY[name]\n"
+        "        return getattr(importlib.import_module(module_name, __name__), attr)\n"
+        "    raise AttributeError(name)\n"
+    ),
+    "shadow/shadow/eager.py": "class Client:\n    pass\n",
+    "shadow/shadow/lazy.py": "class Client:\n    pass\n",
+    "rebind/pyproject.toml": '[project]\nname = "rebind"\n',
+    "rebind/rebind/__init__.py": (
+        "__all__ = ['extract']\n"
+        "_LAZY = {'extract': '.first'}\n"
+        "_LAZY = {'extract': '.second'}\n\n"
+        "def __getattr__(name):\n"
+        "    if name in _LAZY:\n"
+        "        return getattr(importlib.import_module(_LAZY[name], __name__), name)\n"
+        "    raise AttributeError(name)\n"
+    ),
+    "rebind/rebind/first.py": "def extract():\n    pass\n",
+    "rebind/rebind/second.py": "def extract():\n    pass\n",
     "app/pyproject.toml": (
         '[project]\nname = "app"\n[project.scripts]\napp = "app.main:run"\n'
     ),
@@ -62,6 +123,10 @@ EXPORTED = {
     "lib/lib/store/disk.py::Store": "lib/lib/store/__init__.py",
     "web/src/render.ts::render": "web/src/main.ts",
     "web/src/extra.ts::extra": "web/src/extra.ts",
+    "lazy/lazy/extract.py::extract": "lazy/lazy/__init__.py",
+    "local/local/extract.py::extract": "local/local/__init__.py",
+    "shadow/shadow/eager.py::Client": "shadow/shadow/__init__.py",
+    "rebind/rebind/second.py::extract": "rebind/rebind/__init__.py",
 }
 
 

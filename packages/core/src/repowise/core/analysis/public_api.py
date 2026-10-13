@@ -13,12 +13,17 @@ Two readers share it: a wiki page's Public API section, and the per-symbol
 
 from __future__ import annotations
 
+import ast
 from collections.abc import Iterable, Mapping
 from collections.abc import Set as AbstractSet
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 from repowise.core.ingestion.barrels import BARREL_FILENAMES
+from repowise.core.ingestion.languages.python_modules import (
+    build_python_module_index,
+    dotted_module_for,
+)
 from repowise.core.ingestion.package_roots import module_for, package_roots_from_paths
 from repowise.core.workspace.code_api import dunder_all
 
@@ -54,6 +59,8 @@ def api_roots(
 
 def _forwards(imp: Any, pf: Any) -> bool:
     """Whether *imp* publishes what it imports (a re-export), not just uses it."""
+    if getattr(imp, "deferred", False):
+        return False
     if imp.is_reexport or imp.raw_statement.lstrip().startswith("export"):
         return True
     # A Python package's ``__init__`` imports are its published namespace.
@@ -71,6 +78,103 @@ def _declared(pf: Any) -> dict[str, Any]:
         and s.kind not in _UNPUBLISHED_KINDS
         and s.name != "__all__"
     }
+
+
+def _string_literal(node: ast.AST | None) -> str | None:
+    return node.value if isinstance(node, ast.Constant) and isinstance(node.value, str) else None
+
+
+def _literal_lazy_map(node: ast.AST | None) -> dict[str, tuple[str, str | None]]:
+    """Read one conservative ``__getattr__`` map, or nothing if it is computed."""
+    if not isinstance(node, ast.Dict) or len(node.keys) != len(node.values):
+        return {}
+    result: dict[str, tuple[str, str | None]] = {}
+    for key_node, value_node in zip(node.keys, node.values, strict=True):
+        key = _string_literal(key_node)
+        if key is None:
+            return {}
+        module: str | None = None
+        attr: str | None = None
+        if isinstance(value_node, ast.Tuple) and len(value_node.elts) == 2:
+            module = _string_literal(value_node.elts[0])
+            attr = _string_literal(value_node.elts[1])
+        else:
+            module = _string_literal(value_node)
+            attr = key
+        if not module or not attr:
+            return {}
+        result[key] = (module, attr)
+    return result
+
+
+def _module_lazy_maps(tree: ast.Module) -> list[dict[str, tuple[str, str | None]]]:
+    """Find literal maps read by a module-level ``__getattr__`` function."""
+    functions = [
+        node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "__getattr__"
+    ]
+    if not functions:
+        return []
+    loads = {
+        node.id
+        for function in functions
+        for node in ast.walk(function)
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
+    }
+    effective: dict[str, dict[str, tuple[str, str | None]]] = {}
+    statements = [*tree.body, *(statement for function in functions for statement in function.body)]
+    for statement in statements:
+        if isinstance(statement, ast.Assign):
+            targets = statement.targets
+            value = statement.value
+        elif isinstance(statement, ast.AnnAssign) and statement.value is not None:
+            targets = [statement.target]
+            value = statement.value
+        else:
+            continue
+        names = {target.id for target in targets if isinstance(target, ast.Name)}
+        lazy_map = _literal_lazy_map(value)
+        for name in names & loads:
+            # An empty result also records a computed or empty later assignment,
+            # so an earlier literal map cannot survive a rebinding.
+            effective[name] = lazy_map
+    return [lazy_map for lazy_map in effective.values() if lazy_map]
+
+
+def _lazy_map_from(
+    path: str,
+    paths: set[str],
+    module_index: Mapping[str, str],
+    source_path: str | None = None,
+) -> list[tuple[str, str, str]]:
+    """Return ``(public_name, target_module, target_name)`` lazy exports."""
+    try:
+        source = Path(source_path or path).read_text(encoding="utf-8", errors="replace")
+        tree = ast.parse(source)
+    except (OSError, SyntaxError, ValueError):
+        return []
+    current = dotted_module_for(path, paths)
+    if not current:
+        return []
+    package = current if path.rsplit("/", 1)[-1] == "__init__.py" else current.rsplit(".", 1)[0]
+    package_parts = package.split(".") if package else []
+    exports: list[tuple[str, str, str]] = []
+    for lazy_map in _module_lazy_maps(tree):
+        for public_name, (module_name, target_name) in lazy_map.items():
+            if module_name.startswith("."):
+                level = len(module_name) - len(module_name.lstrip("."))
+                if level > len(package_parts) + 1:
+                    continue
+                base = package_parts[: len(package_parts) - (level - 1)]
+                tail = module_name.lstrip(".")
+                resolved_module = ".".join((*base, tail)) if tail else ".".join(base)
+            else:
+                resolved_module = module_name
+            target_path = module_index.get(resolved_module)
+            if target_path and target_name:
+                exports.append((public_name, target_path, target_name))
+    return exports
 
 
 def _entry(name: str, sym: Any, path: str, alias_of: str) -> dict:
@@ -102,6 +206,8 @@ class _Resolver:
         self._parsed = parsed
         self._memo: dict[str, _Published] = {}
         self._visiting: set[str] = set()
+        self._paths = set(parsed)
+        self._module_index = build_python_module_index(self._paths)
         # Set when a cycle cut a walk short; such partial results are not memoized.
         self._cut = False
 
@@ -130,6 +236,40 @@ class _Resolver:
         for imp in pf.imports:
             if _forwards(imp, pf) and imp.resolved_file in self._parsed:
                 out += self._forwarded(imp)
+        lazy_exports = (
+            _lazy_map_from(
+                path,
+                self._paths,
+                self._module_index,
+                getattr(pf.file_info, "abs_path", None),
+            )
+            if pf.file_info.language == "python"
+            else []
+        )
+        published_names = {name for name, _sym, _path in out}
+        # A Python module alias binds its local name at import time, even
+        # though the existing eager-export reader does not publish a module
+        # namespace row for it.  It must still win over a same-named lazy
+        # fallback.  Imports inside a deferred function are excluded by
+        # ``_forwards`` above.
+        if pf.file_info.language == "python":
+            published_names.update(
+                binding.local_name
+                for imp in pf.imports
+                if _forwards(imp, pf) and imp.resolved_file in self._parsed
+                for binding in imp.bindings
+                if binding.local_name != "*"
+            )
+        for public_name, target_path, target_name in lazy_exports:
+            if public_name in published_names:
+                continue
+            hit = next(
+                (r for r in self.published(target_path) if r[0] == target_name),
+                None,
+            )
+            if hit is not None:
+                out.append((public_name, hit[1], hit[2]))
+                published_names.add(public_name)
         self._visiting.discard(path)
         if not self._cut:
             self._memo[path] = out
@@ -156,7 +296,9 @@ class _Resolver:
             return list(self.exported(imp.resolved_file))
         out: _Published = []
         for b in imp.bindings:
-            if b.local_name == "*" or b.is_module_alias:
+            if b.local_name == "*":
+                continue
+            if b.is_module_alias:
                 continue
             wanted = b.exported_name or b.local_name
             hit = next(
@@ -175,8 +317,8 @@ def compute_public_api(
 
     A symbol published under a second name (``export { A as B }``) is listed
     again with ``alias_of`` and no excerpt. Ceiling: ``export { default as X }``,
-    a computed ``__all__`` and an ``import`` followed by a bare ``export { X }``
-    are not followed.
+    computed ``__all__`` values, computed lazy-export maps, and an ``import``
+    followed by a bare ``export { X }`` are not followed.
     """
     resolver = _Resolver(parsed)
     first_name: dict[tuple[str, str], str] = {}  # (file, symbol) -> first public name
