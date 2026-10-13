@@ -25,6 +25,7 @@ per strategy, and it is what the edge carries.
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import PurePosixPath
 from typing import Any
@@ -156,7 +157,7 @@ def _is_property_accessor(sym: Any) -> bool:
 
 # Languages admitted to the full return-type chain lane; each is admitted
 # explicitly, once measured.
-PRODUCTION_RETURN_TYPE_CHAIN_LANGUAGES: frozenset[str] = frozenset({"cpp", "csharp", "go"})
+PRODUCTION_RETURN_TYPE_CHAIN_LANGUAGES: frozenset[str] = frozenset({"cpp", "csharp", "go", "java"})
 
 # Chain lanes that need a file or import/re-export identity for the head type:
 # a repository-global simple type name is not a language binding.
@@ -281,6 +282,8 @@ class CallResolver(LanguageStrategiesMixin, ReceiverTypingMixin):
         )
         self._ancestors: dict[str, tuple[str, ...]] = {}
         self._mros: dict[str, tuple[str, ...] | None] = {}
+        # {type name: [(file, identity, arity)]}, filled by ``_declared_types_named``.
+        self._declared_types: dict[str, list[tuple[str, tuple[str, ...], int]]] = {}
         # Per-file symbol index: {file_path: {symbol_name: symbol_id}}
         self._file_symbols: dict[str, dict[str, str]] = {}
         # The same, top-level symbols only: what a module alias can reach.
@@ -963,7 +966,7 @@ class CallResolver(LanguageStrategiesMixin, ReceiverTypingMixin):
 
         language = self._language_of(file_path) or ""
         receiver_call = call.receiver_call
-        if language == "python" and _is_super_receiver(receiver_call):
+        if _is_super_call(call, language):
             return self._with_props(self._super_call(call, caller_id), call)
         # A language with an `external_return_types` table reaches the tier for
         # that table alone; only the constant above admits the full lane.
@@ -977,12 +980,15 @@ class CallResolver(LanguageStrategiesMixin, ReceiverTypingMixin):
             if handled:
                 return resolved
 
+        bare_fallback = self._strategies_for(file_path).member_bare_fallback
         # --- Method call with receiver: receiver.method() ---
         if call.receiver_name:
             handled, hit = self._resolve_member_call(file_path, call, caller_id)
-            if not handled and call.bare_name_fallback:
+            if not handled and call.bare_name_fallback and bare_fallback:
                 hit = self._resolve_free_call(file_path, call, caller_id)
             return self._with_props(hit, call)
+        if receiver_call is not None and not bare_fallback:
+            return None
 
         # --- Free function call: function() ---
         return self._with_props(self._resolve_free_call(file_path, call, caller_id), call)
@@ -1233,11 +1239,11 @@ class CallResolver(LanguageStrategiesMixin, ReceiverTypingMixin):
 
         A receiver records one hop, but the parser keeps every link of a chain
         as its own site on the chain's first line, so the hop below is read
-        off the site *inner* names. Only C# reads it; elsewhere an inner call
-        is still typed as if nothing were chained under it. Go reads it too, so a
-        builder chain types each link from the one before.
+        off the site *inner* names. C#, Go and Java read it, so a builder chain
+        types each link from the one before; elsewhere an inner call is still
+        typed as if nothing were chained under it.
         """
-        if language not in ("csharp", "go"):
+        if language not in ("csharp", "go", "java"):
             return None
         sites = self._chained_sites.get(file_path)
         if sites is None:
@@ -1807,6 +1813,8 @@ class CallResolver(LanguageStrategiesMixin, ReceiverTypingMixin):
     def _super_call(self, call: CallSite, caller_id: str) -> ResolvedCall | None:
         """``super().m()``: the first class after the caller's own in its MRO to declare ``m``.
 
+        Java's ``super.m()`` arrives here too, with ``super`` as its receiver.
+
         Never handed to the bare-name tiers, which answered with whichever
         same-named method the file declared last. A base outside the
         repository ends the walk unresolved: it may declare ``m`` itself.
@@ -1904,14 +1912,52 @@ class CallResolver(LanguageStrategiesMixin, ReceiverTypingMixin):
             return None
         return self._ancestor_method(class_id, method_name, caller_id)
 
-    def _ancestor_method(self, class_id: str, method_name: str, caller_id: str) -> str | None:
-        """The one method of this name *class_id*'s ancestors declare, never the caller."""
+    def _ancestor_method(
+        self, class_id: str, method_name: str, caller_id: str, *, class_chain_first: bool = False
+    ) -> str | None:
+        """The one method of this name *class_id*'s ancestors declare, never the caller.
+
+        With *class_chain_first*, Java's rule: the nearest declaration up the
+        single superclass chain overrides the rest, so it answers before the
+        uniqueness check over every ancestor.
+        """
+        if class_chain_first:
+            nearest = self._superclass_chain_method(class_id, method_name)
+            if nearest is not None:
+                return None if nearest == caller_id else nearest
         hits = set()
         for ancestor in self._ancestors_of(class_id):
             sym_id = self._declares(ancestor, method_name)
             if sym_id is not None and sym_id != caller_id:
                 hits.add(sym_id)
         return next(iter(hits)) if len(hits) == 1 else None
+
+    def _superclass_chain_method(self, class_id: str, method_name: str) -> str | None:
+        """The nearest declaration of *method_name* up the single superclass chain."""
+        for node in self._superclass_chain(class_id):
+            sym_id = self._declares(node, method_name)
+            if sym_id is not None:
+                return sym_id
+        return None
+
+    def _superclass_chain(self, class_id: str) -> Iterator[str]:
+        """*class_id*'s superclasses, nearest first.
+
+        The walk stops where a type has no class parent, more than one, or
+        one already seen.
+        """
+        node, seen = class_id, {class_id}
+        while True:
+            parents = [
+                p
+                for p in self._heritage_parents.get(node, ())
+                if getattr(self._symbols_by_id.get(p), "kind", None) == "class"
+            ]
+            if len(parents) != 1 or parents[0] in seen:
+                return
+            seen.add(parents[0])
+            node = parents[0]
+            yield node
 
     def _declares(self, class_id: str, method_name: str) -> str | None:
         """The symbol a type node declares under *method_name*, or None.
@@ -1945,12 +1991,14 @@ class CallResolver(LanguageStrategiesMixin, ReceiverTypingMixin):
         self,
         file_path: str,
         key: tuple[str, str],
+        spelled: str | None = None,
     ) -> tuple[str, str] | None:
         """The symbol a ``(class, method)`` pair names, and the scope that held it.
 
         No class declares the pair unless the global method index holds it, and
         that check also keeps the merged-import view from being built for a
-        pair that cannot be in it.
+        pair that cannot be in it. *spelled* is the type as the call site
+        wrote it when that carries a C# arity (``Policy`1``) the key drops.
         """
         if key not in self._global_methods:
             return None
@@ -1963,20 +2011,65 @@ class CallResolver(LanguageStrategiesMixin, ReceiverTypingMixin):
         if key in merged_methods:
             return merged_methods[key], "import"
 
-        # Trait method dispatch — the method may be defined on a trait's impl
-        # block in another file. The global index preserves file-insertion
-        # match order; the caller's own file is skipped.
-        for path, sym_id in self._global_methods[key]:
-            if path != file_path:
-                return sym_id, "global"
+        return self._repo_wide_method(key, spelled or key[0])
 
-        return None
+    def _repo_wide_method(self, key: tuple[str, str], spelled: str) -> tuple[str, str] | None:
+        """The global tier: the one method *key* can name anywhere, or None.
+
+        Nothing at this scope tells two same-named types apart, so it answers
+        only when one repository type can be meant and one method of it
+        matches. Otherwise a call on one project's ``MainWindow`` binds to
+        whichever ``MainWindow`` sorts first, even one that merely inherits
+        the method. A file declaring only a type the call cannot mean (another
+        arity of a C# generic) holds no candidate; any other file, including
+        one with no type of that name (a trait ``impl``, an out-of-line C++
+        body), still does.
+        """
+        bare, _, arity = spelled.partition("`")
+        declared = self._declared_types_named(bare)
+        meant = {identity for _, identity, count in declared if count == int(arity or 0)}
+        if len(meant) > 1:
+            return None
+        owners: dict[str, set[tuple[str, ...]]] = defaultdict(set)
+        for path, identity, _ in declared:
+            owners[path].add(identity)
+        candidates = self._collapse_declarations(
+            [
+                sym_id
+                for path, sym_id in self._global_methods[key]
+                if len(owners.get(path, ())) != 1 or owners[path] <= meant
+            ]
+        )
+        if len(candidates) != 1:
+            return None
+        return next(iter(candidates)), "global"
+
+    def _declared_types_named(self, name: str) -> list[tuple[str, tuple[str, ...], int]]:
+        """``(file, identity, arity)`` for each repository type declared as *name*.
+
+        The fragments of one ``partial`` type share an identity. A forward
+        declaration and a Rust ``impl`` block declare no type.
+        """
+        found = self._declared_types.get(name)
+        if found is not None:
+            return found
+        found = []
+        for sym_id in self._global_symbols.get(name, ()):
+            symbol = self._symbols_by_id[sym_id]
+            if symbol.kind not in _TYPE_KINDS or symbol.kind == "impl" or symbol.is_declaration:
+                continue
+            path = self._symbol_paths_by_id[sym_id]
+            arity = symbol.type_parameter_count or 0
+            identity = self._partial_fragments.get((path, name)) or (sym_id,)
+            found.append((path, (*identity, str(arity)), arity))
+        self._declared_types[name] = found
+        return found
 
     def _answers_for_a_foreign_type(self, file_path: str, receiver_name: str) -> bool:
         """Is the repo-wide tier about to answer a call on a type we do not own?
 
-        Asked only of the ``global`` tier, which takes the first file-order
-        match for a ``(type, method)`` pair with no uniqueness check. A
+        Asked only of the ``global`` tier, which answers whenever the
+        repository declares one type of that name with the method. A
         repository that writes ``impl Trait for Vec<Entity>`` declares a
         ``Vec::new``, and without this every ``Vec::new()`` in the tree would
         bind to it. The narrower tiers are grounded in the caller's own file or
@@ -2029,9 +2122,17 @@ def _rivals_a_class_method(symbol_id: str) -> bool:
     return len(parts) >= 3 and id_segment_name(parts[-1]) != id_segment_name(parts[-2])
 
 
-def _is_super_receiver(receiver: CallReceiver | None) -> bool:
-    """Is this chained call's receiver Python's ``super(...)``?"""
-    return receiver is not None and receiver.target_name == "super" and receiver.receiver_name is None
+def _is_super_call(call: CallSite, language: str) -> bool:
+    """Python's ``super().m()`` (a chained call) or Java's ``super.m()``."""
+    if language == "java":
+        return call.receiver_name == "super"
+    receiver = call.receiver_call
+    return (
+        language == "python"
+        and receiver is not None
+        and receiver.target_name == "super"
+        and receiver.receiver_name is None
+    )
 
 
 def _c3_merge(sequences: list[tuple[str, ...]]) -> list[str] | None:
