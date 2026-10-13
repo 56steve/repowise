@@ -185,6 +185,23 @@ def _overload_return_types(
     return found
 
 
+def _overload_phase(admitted: tuple[int, int | None], argument_count: int) -> int | None:
+    """The first phase in which a member with *admitted* arguments takes the call.
+
+    0 for exactly that arity, 1 when its defaults admit the count (Java's first
+    phase, C#'s normal form), 2 when its varargs or ``params`` expand to it,
+    and None when it cannot take the call.
+    """
+    fewest, most = admitted
+    if argument_count < fewest:
+        return None
+    if most is None:
+        return 2
+    if argument_count > most:
+        return None
+    return 0 if fewest == most else 1
+
+
 def _flattened_wildcard_source(imp: Import) -> str | None:
     """The repository file whose every name *imp* forwards, or None.
 
@@ -315,6 +332,9 @@ class CallResolver(LanguageStrategiesMixin, ReceiverTypingMixin):
         # {representative: ((member id, (fewest, most) arguments), ...)}.
         self._overload_rep: dict[str, str] = {}
         self._overload_members: dict[str, tuple[tuple[str, tuple[int, int | None]], ...]] = {}
+        # Representatives of sets with a member whose range is unknown; a count
+        # cannot choose there, since that member may admit it too.
+        self._unranged_overload_sets: set[str] = set()
         self._symbols_by_id = {
             symbol.id: symbol for parsed in parsed_files.values() for symbol in parsed.symbols
         }
@@ -630,7 +650,9 @@ class CallResolver(LanguageStrategiesMixin, ReceiverTypingMixin):
             for sym in overloads:
                 representatives[sym.id] = rep
                 admitted = signature_parameter_range(sym.signature or "", sym.language)
-                if admitted is not None:
+                if admitted is None:
+                    self._unranged_overload_sets.add(rep)
+                else:
                     ranges.setdefault(sym.id, admitted)
             self._overload_members[rep] = tuple(ranges.items())
         self._overload_rep.update(representatives)
@@ -909,14 +931,13 @@ class CallResolver(LanguageStrategiesMixin, ReceiverTypingMixin):
         """Move an edge on an overload set onto the member its arguments call.
 
         Every tier answers with the set's representative; this is the one place
-        a member is chosen. A count no member admits, a tie, or an unknown count
-        (a method reference, a C# method group) keeps the representative. An
-        overload calling itself is recursion, which draws no edge.
+        a member is chosen (``_overload_target``). An overload calling itself is
+        recursion, which draws no edge.
         """
         rep = self._overload_rep.get(resolved.callee_id)
         if rep is None:
             return resolved
-        target = self._pick_overload(rep, call.argument_count) or rep
+        target = self._overload_target(rep, call.argument_count)
         if target == resolved.caller_id:
             return None
         return resolved if target == resolved.callee_id else replace(resolved, callee_id=target)
@@ -929,16 +950,45 @@ class CallResolver(LanguageStrategiesMixin, ReceiverTypingMixin):
         form), then one whose varargs or ``params`` expand to it. The first
         phase with any candidate decides, and two candidates there are a tie.
         """
-        if argument_count is None:
-            return None
-        members = self._overload_members.get(rep, ())
-        phases = (
-            [m for m, (fewest, most) in members if fewest == most == argument_count],
-            [m for m, (fewest, most) in members if most is not None and fewest <= argument_count <= most],
-            [m for m, (fewest, most) in members if most is None and fewest <= argument_count],
-        )
-        found = next((phase for phase in phases if phase), [])
+        found = self._deciding_overloads(rep, argument_count)
         return found[0] if len(found) == 1 else None
+
+    def _overload_target(self, rep: str, argument_count: int | None) -> str:
+        """The member of *rep*'s set a call lands on.
+
+        The member ``_pick_overload`` names, else the representative when the
+        count cannot choose: it is unknown (a method reference, a C# method
+        group), no member admits it, or a member's range is unknown, since
+        that member may admit it too. A tie keeps the representative when it
+        is one of the tied members. A tie among others takes the first of them in declaration
+        order, the order the overload index records: ``charset(x)`` over
+        ``charset()``, ``charset(String)`` and ``charset(Charset)`` never means
+        the no-argument representative, but it does mean the set, which dead
+        code judges as one unit and a constructor set needs for any inbound
+        edge at all.
+        """
+        found = self._deciding_overloads(rep, argument_count)
+        if len(found) == 1:
+            return found[0]
+        tied = self._tied_without_representative(rep, found)
+        return tied[0] if tied else rep
+
+    def _tied_without_representative(self, rep: str, found: list[str]) -> list[str]:
+        """*found* when it is a tie the representative is not in."""
+        if len(found) > 1 and rep not in found:
+            return found
+        return []
+
+    def _deciding_overloads(self, rep: str, argument_count: int | None) -> list[str]:
+        """The members of the first phase with any candidate for *argument_count*."""
+        if argument_count is None or rep in self._unranged_overload_sets:
+            return []
+        phases: dict[int, list[str]] = defaultdict(list)
+        for member, admitted in self._overload_members.get(rep, ()):
+            phase = _overload_phase(admitted, argument_count)
+            if phase is not None:
+                phases[phase].append(member)
+        return phases[min(phases)] if phases else []
 
     def _overload_sibling_call(self, call: CallSite) -> ResolvedCall | None:
         """An overload calling another member of its own set, ``f(a)`` inside ``f(a, b)``.
@@ -1220,7 +1270,18 @@ class CallResolver(LanguageStrategiesMixin, ReceiverTypingMixin):
         callee_id = resolved_inner.callee_id
         rep = self._overload_rep.get(callee_id)
         if rep is not None:
-            callee_id = self._pick_overload(rep, inner.argument_count) or callee_id
+            tied = self._tied_without_representative(
+                rep, self._deciding_overloads(rep, inner.argument_count)
+            )
+            # A tie names a type only when every tied member returns it.
+            returns = {
+                self._callee_return_type(member, inner.argument_count, language) for member in tied
+            }
+            if len(returns) > 1 or None in returns:
+                return None
+            target = self._overload_target(rep, inner.argument_count)
+            if target != rep:
+                callee_id = target
         return callee_id
 
     def _callee_chain_return_type(
