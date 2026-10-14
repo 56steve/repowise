@@ -45,6 +45,7 @@ from repowise.server.chat_tools import (
     get_tool_catalog,
     get_tool_schemas_for_llm,
 )
+from repowise.server.chat_views import SHOW_VIEW_TOOL, TurnViews, show_view_schema
 from repowise.server.deps import (
     get_db_session,
     request_principal,
@@ -209,16 +210,26 @@ class _AgentTurn:
         self.tool_calls: list[dict[str, Any]] = []
         self.aborted = False
         self.truncated = False
+        self.views = TurnViews()
 
     async def execute(self, name: str, args: dict) -> dict:
         """Run one tool scoped to this repo; also handed to providers that loop internally."""
-        return await execute_tool(
+        if name == SHOW_VIEW_TOOL:
+            return self.views.show(args)
+        result = await execute_tool(
             name,
             args,
             repo_path=self.repo_path,
             repo=self.repo_alias,
             principal=self.principal,
             repo_id=self.repo_id,
+        )
+        return self.views.record(
+            name,
+            args,
+            result,
+            artifact_type=get_artifact_type(name, self.repo_path),
+            evidence_basis=get_artifact_evidence_basis(name, self.repo_path),
         )
 
     async def ground(self, page_context: Any, tool_catalog: list) -> str | None:
@@ -229,7 +240,7 @@ class _AgentTurn:
         plan = plan_grounding(page_context, (tool.entry for tool in tool_catalog))
         if plan is not None and _history_has_call(self.llm_messages, plan.tool_name, plan.arguments):
             plan = None
-        grounding = await run_grounding(plan, self.execute)
+        grounding = await run_grounding(plan, self.execute, unstamp=self.views.unstamp)
         if grounding is None:
             return None
         self.llm_messages.extend(grounding.llm_messages())
@@ -270,6 +281,8 @@ class _AgentTurn:
         }
         if self.truncated:
             content["truncated"] = True
+        if self.views.parts:
+            content["views"] = self.views.parts
         # A turn that read nothing, or read only failures, has no next
         # step to propose.
         follow_ups = follow_up_suggestions(self.tool_calls)
@@ -350,17 +363,19 @@ class _AgentTurn:
     ) -> str:
         """Record one tool result as a stored call and return its SSE event."""
         artifact_type = get_artifact_type(name, self.repo_path)
-        summary = _build_tool_summary(name, result)
+        artifact_id, data = self.views.unstamp(result)
+        summary = _build_tool_summary(name, data)
         artifact = create_artifact_envelope(
             tool_name=name,
             artifact_type=artifact_type,
             presentation=get_artifact_presentation(name, self.repo_path),
-            data=result,
+            data=data,
             title=summary,
+            artifact_id=artifact_id,
             evidence_basis=get_artifact_evidence_basis(name, self.repo_path),
         )
         self.tool_calls.append(_stored_tool_call(tool_id, name, arguments, summary, artifact))
-        return _sse_event(
+        sse = _sse_event(
             "data",
             {
                 "type": "tool_result",
@@ -370,6 +385,8 @@ class _AgentTurn:
                 "artifact": artifact,
             },
         )
+        view = self.views.event(tool_id, result) if name == SHOW_VIEW_TOOL else None
+        return sse if view is None else sse + _sse_event("data", view)
 
 
 @router.post("/api/repos/{repo_id}/chat/messages")
@@ -421,6 +438,10 @@ async def chat_messages(repo_id: str, body: ChatRequest, request: Request):
             tool_catalog = get_tool_catalog(repo_path, principal)
             system_prompt = _build_system_prompt(repo_name, repo_path, tool_catalog, body.context)
             tool_schemas = get_tool_schemas_for_llm(repo_path, principal)
+            if tool_catalog:
+                tool_schemas.append(
+                    show_view_schema([tool.entry.artifact_type for tool in tool_catalog])
+                )
 
             turn = _AgentTurn(
                 repo_path, repo_alias, provider, llm_messages, principal=principal, repo_id=repo_id
