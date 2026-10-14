@@ -62,6 +62,7 @@ from .models import (
 )
 from .resolved_call import ResolvedCall
 from .resolvers.cpp import _SOURCE_TU_EXTS
+from .resolvers.jvm_workspace import classify_jvm_import
 from .return_types import (
     declared_return_type,
     normalize_return_type,
@@ -145,6 +146,23 @@ _NON_CALLABLE_KINDS = frozenset({"property"})
 # Languages whose ``variable`` is always a property (`val`/`var`/`let`): a data
 # member. Calling one invokes the value it holds, which is not this symbol.
 _PROPERTY_VARIABLE_LANGUAGES = frozenset({"kotlin", "swift"})
+
+
+# Kotlin's call operator: ``f(x)`` on a value is ``f.invoke(x)`` when its type
+# declares an ``operator fun invoke``.
+_INVOKE_OPERATOR = "invoke"
+_OPERATOR_MODIFIER = "operator"
+
+
+def _imports_a_library(imp: Import) -> bool:
+    """Does *imp* name a JVM library namespace the repository does not hold?"""
+    if classify_jvm_import(imp.module_path, kotlin=True) is None:
+        return False
+    return not imp.resolved_file or imp.resolved_file.startswith(_EXTERNAL_PREFIX)
+
+
+def _is_kotlin_alias(sym: Symbol | None) -> bool:
+    return sym is not None and sym.kind == "type_alias" and sym.language == "kotlin"
 
 
 def _is_data_member(sym: Symbol) -> bool:
@@ -545,6 +563,8 @@ class CallResolver(LanguageStrategiesMixin, ReceiverTypingMixin):
         # kind question asked of it and the set is small.
         self._non_callable_ids: set[str] = set()
         self._callable_ids: set[str] = set()
+        # {Kotlin file: names it imports from a library namespace}
+        self._library_names: dict[str, frozenset[str]] = {}
         # The lines of the file whose declarations are being read; see ``_lines_of``.
         self._indexed_lines: tuple[str, list[str]] = ("", [])
         # C/C++ symbols with internal linkage; see ``_reachable_by_name``.
@@ -1375,11 +1395,112 @@ class CallResolver(LanguageStrategiesMixin, ReceiverTypingMixin):
         call: CallSite,
         caller_id: str,
     ) -> ResolvedCall | None:
-        """A receiver-less call, refused where it lands on an extension it has no receiver for."""
+        """A receiver-less call, refused where it lands on an extension it has no receiver for.
+
+        Also refused on a Kotlin ``typealias``: ``IOException(..)`` through
+        ``actual typealias IOException = java.io.IOException`` constructs the
+        aliased type, which the alias is not. Ceiling: an alias of a repo class
+        draws no edge to that class.
+        """
+        invoked = self._operator_invoke_call(file_path, call, caller_id)
+        if invoked is not None:
+            return invoked
         hit = self._resolve_free_call(file_path, call, caller_id)
+        if hit is not None and _is_kotlin_alias(self._symbols_by_id.get(hit.callee_id)):
+            return None
         if hit is None or call.receiver_call is not None:
             return hit
         return None if self._lacks_extension_receiver(file_path, call, hit.callee_id) else hit
+
+    def _operator_invoke_call(
+        self,
+        file_path: str,
+        call: CallSite,
+        caller_id: str,
+    ) -> ResolvedCall | None:
+        """``useCase(args)`` on a Kotlin value whose type declares ``operator fun invoke``.
+
+        The name is typed as the receiver of ``useCase.invoke(args)``: a local,
+        a parameter, a property of the caller's class or of its file. A local or
+        parameter outranks every function of the name. A property does not
+        outrank a function its own scope declares (Kotlin prefers the function
+        at one level), so a member or top-level ``fun`` of the name leaves the
+        call to the function tiers. The operator may be inherited. A name no
+        declaration types, or a type with no such operator, falls through to
+        the function tiers too.
+        """
+        if not self._may_invoke(file_path, call):
+            return None
+        typed = self._invoked_value_type(file_path, call, caller_id)
+        if typed is None:
+            return None
+        type_name, scope, typing_file = typed
+        as_member = replace(call, receiver_name=call.target_name, target_name=_INVOKE_OPERATOR)
+        if "::" in type_name:
+            hit = self._call_typed_receiver(file_path, as_member, caller_id, type_name)
+            return hit if hit is not None and self._is_operator_invoke(hit.callee_id) else None
+        found = self._invoke_target(typing_file, as_member, caller_id, type_name)
+        if found is None:
+            return None
+        typed_call = self._field_typed_call if scope == "field" else self._body_typed_call
+        return typed_call(caller_id, found[0], found[1], call.line)
+
+    def _may_invoke(self, file_path: str, call: CallSite) -> bool:
+        """Is *call* a bare Kotlin call in a repo that declares some ``invoke`` method?"""
+        return (
+            call.receiver_call is None
+            and self._language_of(file_path) == "kotlin"
+            and _INVOKE_OPERATOR in self._method_names()
+        )
+
+    def _invoke_target(
+        self, typing_file: str, as_member: CallSite, caller_id: str, type_name: str
+    ) -> tuple[str, str] | None:
+        """``(operator invoke id, tier)`` *type_name* declares or inherits, if any."""
+        found = self._typed_receiver_target(
+            typing_file, as_member, caller_id, type_name
+        ) or self._inherited_typed_target(
+            typing_file, as_member, caller_id, id_segment_name(type_name)
+        )
+        return found if found is not None and self._is_operator_invoke(found[0]) else None
+
+    def _invoked_value_type(
+        self, file_path: str, call: CallSite, caller_id: str
+    ) -> tuple[str, str, str] | None:
+        """``(type, scope, typing file)`` of the value a bare Kotlin call names, if it may invoke.
+
+        None for an untyped or builtin-typed name, and for a property (not a
+        local or parameter) whose scope also declares a function of the name.
+        """
+        name = call.target_name
+        type_name, scope, typing_file = self._receiver_type_and_scope(
+            file_path, caller_id, "kotlin", name
+        )
+        if type_name is None:
+            type_name, scope = self._module_types_in(file_path, "kotlin").get(name), "module"
+        if type_name is None or external_type_name(type_name) is not None:
+            return None
+        if scope != "body" and self._function_in_scope(file_path, call, caller_id):
+            return None
+        return type_name, scope, typing_file
+
+    def _is_operator_invoke(self, sym_id: str) -> bool:
+        symbol = self._symbols_by_id.get(sym_id)
+        return (
+            symbol is not None
+            and symbol.name == _INVOKE_OPERATOR
+            and _OPERATOR_MODIFIER in symbol.modifiers
+        )
+
+    def _function_in_scope(self, file_path: str, call: CallSite, caller_id: str) -> bool:
+        """Does the caller's class, or its file at top level, declare a function *call* names?
+
+        A Kotlin ``val`` and ``fun`` of one name share an id; the id is callable
+        when the function is there.
+        """
+        own = self._enclosing_class_method(file_path, call, caller_id)
+        top = self._file_top_level.get(file_path, {}).get(call.target_name)
+        return any(sym_id in self._callable_ids for sym_id in (own, top) if sym_id is not None)
 
     def _with_props(self, res: ResolvedCall | None, call: CallSite) -> ResolvedCall | None:
         if res is not None and call.supplied_props is not None:
@@ -1800,7 +1921,9 @@ class CallResolver(LanguageStrategiesMixin, ReceiverTypingMixin):
             and self._language_of(file_path) == "python"
         ):
             return None
-        if not declared:
+        # A Kotlin import from a library namespace the repo does not hold
+        # (``import java.io.IOException``) binds the name just as surely.
+        if not declared or target_name in self._library_imported_names(file_path):
             return None
         return (
             self._named_import_call(file_path, call, caller_id, binding)
@@ -1906,6 +2029,28 @@ class CallResolver(LanguageStrategiesMixin, ReceiverTypingMixin):
         if target_name in get_builtin_methods(self._language_of(file_path) or ""):
             return None
         return ResolvedCall(caller_id, sym_id, 0.85, call.line, "import_merged")
+
+    def _library_imported_names(self, file_path: str) -> frozenset[str]:
+        """The names a Kotlin file binds by importing a JVM library namespace.
+
+        A namespace ``classify_jvm_import`` knows (the JDK, the Kotlin stdlib,
+        ``kotlinx``, ``androidx``) counts unless the import resolved into the
+        repo, which may be that library. An aliased import binds the alias only.
+        """
+        names = self._library_names.get(file_path)
+        if names is not None:
+            return names
+        parsed = self._parsed_files.get(file_path)
+        kotlin = parsed is not None and parsed.file_info.language == "kotlin"
+        imports = parsed.imports if kotlin else ()
+        names = frozenset(
+            name
+            for imp in imports
+            if _imports_a_library(imp)
+            for name in imp.local_names or [imp.module_path.rsplit(".", 1)[-1]]
+        ) - {"*"}
+        self._library_names[file_path] = names
+        return names
 
     def _repo_wide_free_call(
         self,
