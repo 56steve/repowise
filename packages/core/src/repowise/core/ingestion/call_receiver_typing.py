@@ -48,7 +48,7 @@ from .languages.receiver_types import (
 )
 from .models import CallSite, NamedBinding, ParsedFile, Symbol, symbol_id_language
 from .resolved_call import ResolvedCall
-from .return_types import declared_return_type, go_first_result
+from .return_types import declared_return_type, go_first_result, signature_parameter_count
 from .symbol_identity import id_segment_name, outer_scope, symbol_id_path
 from .type_names import (
     POINTER_LIKE_MEMBERS,
@@ -126,6 +126,8 @@ _MAX_CHAIN_FIELDS = 3
 # A chain is only as scoped as its weakest hop.
 _CHAIN_TIER_RANK = {"same_file": 0, "import": 1}
 _BODY_TYPE_CACHE_ENTRIES = 2048
+# What a Dart ``await`` unwraps: ``Future<T>`` / ``FutureOr<T>`` yield ``T``.
+_AWAITED_FUTURE = re.compile(r"(?:Future|FutureOr)<(.+)>\??")
 
 _K = TypeVar("_K")
 _V = TypeVar("_V")
@@ -1476,9 +1478,11 @@ class ReceiverTypingMixin:
         # A repo-wide guess at the callee is not evidence of what it returns.
         if resolved is None or "global" in resolved.origin:
             return None
-        return self._returned_type_id(resolved.callee_id, awaited)
+        return self._returned_type_id(resolved.callee_id, awaited, site.argument_count)
 
-    def _returned_type_id(self, callee_id: str, awaited: bool = False) -> str | None:
+    def _returned_type_id(
+        self, callee_id: str, awaited: bool = False, argument_count: int | None = None
+    ) -> str | None:
         """The repository type a call to *callee_id* yields, as a symbol id.
 
         A go ``T`` is looked up in the callee's own package and ``pkg.T`` in the
@@ -1489,7 +1493,8 @@ class ReceiverTypingMixin:
         read in the callee's file as a chain hop reads a field's type. A
         property is read, not called, and an ``async def`` returns a coroutine
         unless the call is *awaited*. Any other language's declared return
-        type is read by ``_written_returned_class``.
+        type is read by ``_written_returned_class``. Overloads that disagree
+        on what they return type nothing.
         """
         symbol = self._symbols_by_id.get(callee_id)
         path = self._symbol_paths_by_id.get(callee_id)
@@ -1497,11 +1502,26 @@ class ReceiverTypingMixin:
             return None
         if symbol.kind in _TYPE_KINDS:
             return callee_id  # a conversion, ``T(x)``
+        if self._overloads_disagree(symbol, path, argument_count):
+            return None
         if symbol.language == "go":
             return self._go_returned_type_id(symbol, path)
         if symbol.language == "python":
             return self._python_call_returns(symbol, path, awaited)
-        return self._written_returned_class(symbol, path)
+        return self._written_returned_class(symbol, path, awaited)
+
+    def _overloads_disagree(self, symbol: Symbol, path: str, argument_count: int | None) -> bool:
+        """Do the overloads a call to *symbol* may mean declare different return types?
+
+        Asked at the call's argument count and at the symbol's own parameter
+        count: overloads sharing an id keep one declaration, and an extension
+        is called one argument short of its parameters.
+        """
+        counts = {argument_count, signature_parameter_count(symbol.signature or "")}
+        return any(
+            len(self._overload_return_types.get((path, symbol.parent_name, symbol.name, n), ())) > 1
+            for n in counts
+        )
 
     def _python_call_returns(self, symbol: Symbol, path: str, awaited: bool) -> str | None:
         """``_returned_type_id`` for a Python function.
@@ -1534,14 +1554,18 @@ class ReceiverTypingMixin:
         ]
         return found[0] if len(found) == 1 else None
 
-    def _written_returned_class(self, symbol: Symbol, path: str) -> str | None:
+    def _written_returned_class(
+        self, symbol: Symbol, path: str, awaited: bool = False
+    ) -> str | None:
         """The class *symbol*'s declared return type names, as its file *path* sees it.
 
-        One unqualified class name, nullable or not. Ceiling: a generic
+        One unqualified class name, nullable or not; an *awaited* Dart
+        ``Future<T>`` yields its ``T``. Ceiling: any other generic
         (``Result<T>``) or prefixed (``p.Foo``) return type types nothing.
         """
-        raw = declared_return_type(symbol.signature or "")
-        written = raw.rstrip("?") if raw else ""
+        raw = declared_return_type(symbol.signature or "") or ""
+        future = _AWAITED_FUTURE.fullmatch(raw) if awaited else None
+        written = (future.group(1) if future else raw).rstrip("?")
         if not written.isidentifier():
             return None
         found = self._class_seen_from(path, symbol.id, written, symbol.start_line)
@@ -1553,8 +1577,11 @@ class ReceiverTypingMixin:
         """The edge a bare ``name(..)`` in *scope_id* draws, when it lands on a class.
 
         The tiers a constructor call takes say which class a name means in a
-        file. A repository-wide guess is no evidence of that and is not taken.
+        file. A repository-wide guess is no evidence of that and is not taken,
+        nor is a same-package class the file's import from outside shadows.
         """
+        if name in self._externally_bound_names(file_path):
+            return None
         probe = CallSite(
             target_name=name,
             receiver_name=None,
