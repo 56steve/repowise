@@ -17,6 +17,7 @@ from sqlalchemy import select
 
 from repowise.core.persistence.models import WikiSymbol
 from repowise.server.mcp_server._query_shape import _WORD_CHAIN_RE, _identifier_shaped
+from repowise.server.mcp_server._query_terms import split_humps
 from repowise.server.mcp_server._verify import verify_and_heal
 from repowise.server.mcp_server.tool_answer.config import (
     _ENRICH_TOP_N_HITS,
@@ -127,40 +128,69 @@ def is_symbol_lookup_question(question: str, question_ids: set[str]) -> bool:
     return not _prose_dominates(question, list(question_ids))
 
 
-def _extract_value_answer(hits: list[dict], question_ids: set[str]) -> dict | None:
+def _value_entry(s: dict, path: str) -> dict | None:
+    """The extractable assignment for one hydrated symbol, or None."""
+    if not s.get("_matched") or s.get("kind") not in ("constant", "variable"):
+        return None
+    sig = s.get("signature") or ""
+    if "=" not in sig:
+        return None
+    entry = {
+        "name": s.get("name"),
+        "signature": sig,
+        "file": path,
+        "line": s.get("start_line"),
+        "answer": f"{sig}  ({path}:{s.get('start_line')})",
+    }
+    # Multi-line values: include the live body the hydrator attached.
+    excerpt = s.get("source_excerpt")
+    if excerpt and excerpt.strip() != sig.strip():
+        entry["value_source"] = excerpt
+    return entry
+
+
+def _extract_value_answer(
+    hits: list[dict], question_ids: set[str], question: str
+) -> dict | None:
     """Verbatim-assignment answer for value-shaped questions (the C1 fast path).
 
     A matched constant/variable's signature is the verbatim assignment from
-    live source, so it is the answer, with no LLM call. Exact name matches win
-    over substring matches.
+    live source, so it is the answer, with no LLM call. An exact name match
+    wins. A name that only contains a question identifier (``Symbol`` inside
+    ``SymbolKind``) is a coincidence unless the question's words spell every
+    part of it; otherwise None, so synthesis and its gates answer instead.
     """
     qids_lower = {q.lower() for q in question_ids}
-    candidates: list[dict] = []
+    question_stems = _text_stems(question)
+    question_parts = _name_parts(question)
+    spelled: dict | None = None
     for h in hits[:_ENRICH_TOP_N_HITS]:
         path = h.get("target_path")
-        if not path:
-            continue
-        for s in h.get("symbols") or []:
-            if not s.get("_matched") or s.get("kind") not in ("constant", "variable"):
+        for s in (h.get("symbols") or []) if path else []:
+            entry = _value_entry(s, path)
+            if entry is None:
                 continue
-            sig = s.get("signature") or ""
-            if "=" not in sig:
-                continue
-            entry = {
-                "name": s.get("name"),
-                "signature": sig,
-                "file": path,
-                "line": s.get("start_line"),
-                "answer": f"{sig}  ({path}:{s.get('start_line')})",
-            }
-            # Multi-line values: include the live body the hydrator attached.
-            excerpt = s.get("source_excerpt")
-            if excerpt and excerpt.strip() != sig.strip():
-                entry["value_source"] = excerpt
-            if (s.get("name") or "").lower() in qids_lower:
+            name = entry["name"] or ""
+            if name.lower() in qids_lower:
+                entry["exact_name"] = True
                 return entry
-            candidates.append(entry)
-    return candidates[0] if candidates else None
+            if spelled is None and _question_spells(name, question_stems, question_parts):
+                spelled = entry
+    return spelled
+
+
+def _name_parts(text: str) -> set[str]:
+    """Lowercased hump- and separator-split parts of *text*, short ones included."""
+    return {p.lower() for p in re.split(r"[^A-Za-z0-9]+", split_humps(text)) if p}
+
+
+def _question_spells(name: str, question_stems: set[str], question_parts: set[str]) -> bool:
+    """Whether the question's words cover every part of *name*."""
+    name_stems = _text_stems(name)
+    if not name_stems or not all(_stem_hit(t, question_stems) for t in name_stems):
+        return False
+    # _text_stems drops parts under 3 chars, so `V2` in `MAX_V2` must appear as is.
+    return all(p in question_parts for p in _name_parts(name) if len(p) < 3)
 
 
 def _symbol_def_dict(sym) -> dict:
