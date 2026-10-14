@@ -313,6 +313,21 @@ _RUST_CONSTRUCTED = re.compile(
 )
 
 _C_FAMILY = (_TYPED_DECLARATION, _INFERRED_FROM_NEW)
+
+# A Java primitive or primitive array, ``long start`` / ``int[] xs``. Kept as an
+# external type: no call is made on one, but an overload is chosen by it.
+_JAVA_PRIMITIVE_DECLARATION = re.compile(
+    r"(?<![\w.])(?P<type>(?:boolean|byte|char|short|int|long|float|double)(?:\[\])*(?:\.\.\.)?)"
+    r"\s+(?P<name>[a-z_]\w*)\s*(?=(?P<closer>[=;,):]))"
+)
+# A varargs parameter, ``Foo... xs``: the array it is.
+_JAVA_VARARGS_DECLARATION = re.compile(
+    rf"(?<![\w.])(?P<type>{_TYPE}\.\.\.)\s+(?P<name>[a-z_]\w*)\s*(?=(?P<closer>[,)]))"
+)
+# A pattern variable, ``x instanceof Foo f && ...``: a local wherever it ends.
+_JAVA_PATTERN_VARIABLE = re.compile(
+    rf"(?<![\w.])instanceof\s+(?:final\s+)?(?P<type>{_TYPE})\s+(?P<name>[a-z_]\w*)\b(?!\s*[.(])"
+)
 # Only the field shapes reach class scope. Go is still not in
 # IMPLICIT_FIELD_LANGUAGES: a field is read through its receiver (``c.parent``),
 # so it types a chain hop and never a bare name.
@@ -328,7 +343,12 @@ _LANGUAGE_PATTERNS: dict[str, tuple[re.Pattern[str], ...]] = {
     "csharp": _C_FAMILY,
     "dart": _DART_FAMILY,
     "go": _GO_FAMILY,
-    "java": _C_FAMILY,
+    "java": (
+        *_C_FAMILY,
+        _JAVA_PRIMITIVE_DECLARATION,
+        _JAVA_VARARGS_DECLARATION,
+        _JAVA_PATTERN_VARIABLE,
+    ),
     "kotlin": _KT_FAMILY,
     "python": _PY_FAMILY,
     "rust": (_RUST_ANNOTATED, _RUST_CONSTRUCTED),
@@ -918,6 +938,10 @@ def _nests_in_a_builtin(raw: str, language: str) -> bool:
     return bool(separator) and head in get_builtin_types(language)
 
 
+def _is_java_array(raw: str, language: str) -> bool:
+    return language == "java" and raw.endswith(("]", "..."))
+
+
 def _usable_type_name(raw: str, language: str) -> tuple[str | None, bool]:
     """``(bare name, unwrapped)`` for *raw*, or ``(None, False)``.
 
@@ -927,7 +951,7 @@ def _usable_type_name(raw: str, language: str) -> tuple[str | None, bool]:
     the lookup falls back to the bare name. A Java ``Token.Tag`` keeps its
     outer type, which picks the member type the lookup means.
     """
-    if _nests_in_a_builtin(raw, language):
+    if _nests_in_a_builtin(raw, language) or _is_java_array(raw, language):
         return None, False
     inner = unwrap_pointer_like(raw) if language == "cpp" else None
     name = inner or (raw if raw.isidentifier() else bare_type_name(raw))
@@ -1015,6 +1039,11 @@ def _builtin_type_name(raw: str, language: str) -> str | None:
     refused rather than left to name matching. A generic parameter (``T``) or
     any other unknown name stays dropped: unknown is not external.
     """
+    if _is_java_array(raw, language):
+        # Any array is a builtin, ``Foo[]`` too, so no call on it reaches ``Foo``.
+        dimensions = raw.replace(" ", "").count("[]") + raw.endswith("...")
+        element = strip_type_arguments(raw.removesuffix("...")).strip()
+        return _EXTERNAL_TYPE + element + "[]" * dimensions
     if _nests_in_a_builtin(raw, language):
         return _EXTERNAL_TYPE + strip_type_arguments(raw).strip()
     name = raw if raw.isidentifier() else bare_type_name(raw)
