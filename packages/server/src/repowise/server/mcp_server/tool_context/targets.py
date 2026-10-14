@@ -43,7 +43,7 @@ from repowise.core.persistence.models import (
     Repository,
     WikiSymbol,
 )
-from repowise.server.mcp_server._basis import call_resolution_basis
+from repowise.server.mcp_server._basis import call_resolution_basis, same_file_basis
 from repowise.server.mcp_server._budget import OmissionCollector, cap_collection
 from repowise.server.mcp_server._edit_sites import reference_edit_set
 from repowise.server.mcp_server._helpers import (
@@ -65,6 +65,7 @@ from repowise.server.mcp_server._symbol_lookup import (
 )
 from repowise.server.mcp_server.tool_context.enrichment import (
     _DOC_DRIFT_PATH,
+    _MIN_CALL_CONFIDENCE,
     _resolve_call_graph,
     _resolve_community,
     _resolve_health,
@@ -994,7 +995,7 @@ async def _resolve_one_target(
             # survive matters: rank by source-file PageRank, path breaking ties.
             sym_node_id = getattr(sym, "symbol_id", None) or getattr(sym, "node_id", None)
             res = await session.execute(
-                select(GraphEdge.source_node_id, GraphNode.file_path)
+                select(GraphEdge.source_node_id, GraphNode.file_path, GraphEdge.confidence)
                 .outerjoin(
                     GraphNode,
                     (GraphNode.repository_id == GraphEdge.repository_id)
@@ -1008,13 +1009,24 @@ async def _resolve_one_target(
             )
             # An id the graph no longer holds still names its file, so fall
             # back to the path half rather than dropping a real user.
-            user_files = {
-                file_path or source_node_id.split("::", 1)[0]
-                for source_node_id, file_path in res.all()
-            }
+            user_files: set[str] = set()
             # A same-file caller is a real use, but naming the file already
             # being read spends a capped row; ``callers`` has it at symbol grain.
+            # Counted first, by the confidence floor include=["callers"] serves
+            # (a recursive call is not a user), so an empty list can say so.
+            same_file_users: set[str] = set()
+            for source_node_id, file_path, confidence in res.all():
+                path = file_path or source_node_id.split("::", 1)[0]
+                user_files.add(path)
+                if (
+                    path == sym.file_path
+                    and source_node_id != sym_node_id
+                    and (confidence or 0) >= _MIN_CALL_CONFIDENCE
+                ):
+                    same_file_users.add(source_node_id)
             user_files.discard(sym.file_path)
+            # Before exclusion: an excluded user elsewhere is still a user.
+            other_file_users = bool(user_files)
             # Looked up by the folded path, not joined above: a source whose
             # symbol node is missing has no file to join through and would rank
             # 0.0. Chunked because this binds one parameter per using file.
@@ -1042,7 +1054,10 @@ async def _resolve_one_target(
             )
             # No users found says nothing on its own until the reader knows how
             # much of this language's call graph the resolver actually bound.
-            if not docs.get("used_by"):
+            # Same-file users make the zero a fact about other files instead.
+            if not docs.get("used_by") and same_file_users and not other_file_users:
+                docs["used_by_basis"] = same_file_basis(len(same_file_users))
+            elif not docs.get("used_by"):
                 docs["used_by_basis"] = await call_resolution_basis(
                     session,
                     repo_id,
