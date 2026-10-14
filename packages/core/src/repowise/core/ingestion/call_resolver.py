@@ -66,7 +66,13 @@ from .return_types import (
     signature_parameter_count,
     signature_parameter_range,
 )
-from .symbol_identity import id_segment_name, outer_scope, pair_overloads, split_symbol_id
+from .symbol_identity import (
+    erased_parameter_types,
+    id_segment_name,
+    outer_scope,
+    pair_overloads,
+    split_symbol_id,
+)
 from .type_names import (
     csharp_extension_receiver,
     is_resolvable_type_name,
@@ -189,6 +195,109 @@ def _overload_phase(admitted: tuple[int, int | None], argument_count: int) -> in
     if argument_count > most:
         return None
     return 0 if fewest == most else 1
+
+
+_ArgumentTypes = tuple[str | None, ...] | None
+
+# The Java primitives a literal of each type widens to, nearest first.
+_JAVA_WIDENING: dict[str, tuple[str, ...]] = {
+    "boolean": ("boolean",),
+    "char": ("char", "int", "long", "float", "double"),
+    "int": ("int", "long", "float", "double"),
+    "long": ("long", "float", "double"),
+    "float": ("float", "double"),
+    "double": ("double",),
+}
+_JAVA_BOXES = {
+    "boolean": "Boolean", "char": "Character", "int": "Integer",
+    "long": "Long", "float": "Float", "double": "Double",
+}
+_JAVA_PRIMITIVES = frozenset({"byte", "short", *_JAVA_WIDENING})
+# Parameter types a literal is judged against; any other (``Object``, a type
+# variable, a class) takes a literal by boxing, or as a ``String``'s supertype.
+_JAVA_JUDGED_PARAMETERS = _JAVA_PRIMITIVES | frozenset(
+    {*_JAVA_BOXES.values(), "Byte", "Short", "String", "CharSequence"}
+)
+# {literal: {judged parameter: how it is reached}}: 0 exactly, 1 widened, 2 boxed.
+_JAVA_LITERAL_LEVELS: dict[str, dict[str, int]] = {
+    **{
+        literal: {p: int(p != literal) for p in widened} | {_JAVA_BOXES[literal]: 2}
+        for literal, widened in _JAVA_WIDENING.items()
+    },
+    "String": {"String": 0, "CharSequence": 1},
+    "null": dict.fromkeys(_JAVA_JUDGED_PARAMETERS - _JAVA_PRIMITIVES, 1),
+}
+_UNJUDGED_LEVEL = {**dict.fromkeys(_JAVA_WIDENING, 2), "String": 1, "null": 1}
+
+
+def _literal_fit(parameter: str, literal: str) -> int | None:
+    """How a Java literal reaches *parameter*: 0 exactly, 1 widened, 2 boxed; None never.
+
+    A coarse form of the most-specific rule: a call ``f(true)`` takes
+    ``f(boolean)`` over ``f(Object)``, and ``f('c')`` takes ``f(int)`` over it.
+    """
+    if parameter not in _JAVA_JUDGED_PARAMETERS:
+        return _UNJUDGED_LEVEL[literal]
+    return _JAVA_LITERAL_LEVELS[literal].get(parameter)
+
+
+def _closest_literal_fit(
+    members: list[tuple[str, list[str]]], argument_types: tuple[str | None, ...], expanded: bool
+) -> str | None:
+    """The one member the literal arguments fit most closely, or None on a tie.
+
+    Only where the members agree on every non-literal argument's parameter:
+    there the literals are all that tells them apart. *expanded* says the
+    members take the call through their varargs.
+    """
+    if not _non_literals_agree(members, argument_types, expanded):
+        return None
+    ranked: dict[int, list[str]] = defaultdict(list)
+    for member, parameters in members:
+        fits = [
+            _literal_fit(_parameter_at(parameters, index, expanded) or "", literal)
+            for index, literal in enumerate(argument_types)
+            if literal is not None
+        ]
+        if all(fit is not None for fit in fits):
+            ranked[max(fits, default=0)].append(member)
+    best = ranked[min(ranked)] if ranked else []
+    return best[0] if len(best) == 1 else None
+
+
+def _non_literals_agree(
+    members: list[tuple[str, list[str]]], argument_types: tuple[str | None, ...], expanded: bool
+) -> bool:
+    """Whether every member takes each non-literal argument as the same parameter type."""
+    return all(
+        len({_parameter_at(parameters, index, expanded) for _, parameters in members}) == 1
+        for index, literal in enumerate(argument_types)
+        if literal is None
+    )
+
+
+def _parameter_at(parameters: list[str], index: int, expanded: bool) -> str | None:
+    """The parameter type that takes argument *index*.
+
+    Through *expanded* varargs, the trailing array's element type takes the
+    argument at its position and every one after it.
+    """
+    if expanded and parameters and index >= len(parameters) - 1:
+        return parameters[-1].removesuffix("[]")
+    return parameters[index] if index < len(parameters) else None
+
+
+def _java_method_refusing(symbol: Symbol | None, argument_count: int | None) -> bool:
+    """Whether *symbol* is a Java method whose parameters cannot take *argument_count*."""
+    if symbol is None or argument_count is None:
+        return False
+    return symbol.language == "java" and symbol.kind == "method" and not _takes(symbol, argument_count)
+
+
+def _takes(symbol: Symbol, argument_count: int) -> bool:
+    """Whether *symbol*'s parameters admit *argument_count*; an unread signature does."""
+    admitted = signature_parameter_range(symbol.signature or "", symbol.language)
+    return admitted is None or _overload_phase(admitted, argument_count) is not None
 
 
 def _flattened_wildcard_source(imp: Import) -> str | None:
@@ -911,13 +1020,63 @@ class CallResolver(LanguageStrategiesMixin, ReceiverTypingMixin):
         """
         rep = self._overload_rep.get(resolved.callee_id)
         if rep is None:
-            return resolved
-        target = self._overload_target(rep, call.argument_count)
+            return self._inherited_overload(resolved, call)
+        target = self._overload_target(rep, call.argument_count, call.argument_types)
         if target == resolved.caller_id:
             return None
         return resolved if target == resolved.callee_id else replace(resolved, callee_id=target)
 
-    def _pick_overload(self, rep: str, argument_count: int | None) -> str | None:
+    def _inherited_overload(self, resolved: ResolvedCall, call: CallSite) -> ResolvedCall | None:
+        """A Java callee that cannot take the call's arguments yields to an inherited overload.
+
+        ``getField(i)`` in a class that overrides only ``getField(int, Chronology)``
+        calls the one-parameter ``getField`` a superclass declares. With no
+        ancestor overload that takes the count, the edge goes: its callee
+        cannot be what the call means, and a constructor inherits none. Java
+        only, where arity is binding.
+        """
+        callee = self._symbols_by_id.get(resolved.callee_id)
+        if not _java_method_refusing(callee, call.argument_count):
+            return resolved
+        assert callee is not None
+        target = None if callee.name == callee.parent_name else self._inherited_taker(resolved, call)
+        return None if target in (None, resolved.caller_id) else replace(resolved, callee_id=target)
+
+    def _inherited_taker(self, resolved: ResolvedCall, call: CallSite) -> str | None:
+        """The ancestor overload of the callee's name that takes *call*, or None.
+
+        Java looks the name up through the whole hierarchy, so a nearer
+        declaration that cannot take the count does not hide a farther one
+        that can. The superclass chain answers nearest first; past it, one
+        other ancestor (an interface default) must be the only taker.
+        """
+        class_id = self._caller_class_id(resolved.callee_id)
+        name = self._symbols_by_id[resolved.callee_id].name
+        chain = tuple(self._superclass_chain(class_id))
+        for ancestor in chain:
+            target = self._taker_in(ancestor, name, call)
+            if target is not None:
+                return target
+        takers = {
+            self._taker_in(ancestor, name, call)
+            for ancestor in self._ancestors_of(class_id)
+            if ancestor not in chain
+        } - {None}
+        return takers.pop() if len(takers) == 1 else None
+
+    def _taker_in(self, type_id: str, name: str, call: CallSite) -> str | None:
+        """The member of *type_id*'s own *name* overloads that takes *call*, or None."""
+        declared = self._declares(type_id, name)
+        if declared is None or self._symbols_by_id[declared].kind != "method":
+            return None
+        count = call.argument_count or 0
+        rep = self._overload_rep.get(declared)
+        target = declared if rep is None else self._overload_target(rep, count, call.argument_types)
+        return target if _takes(self._symbols_by_id[target], count) else None
+
+    def _pick_overload(
+        self, rep: str, argument_count: int | None, argument_types: _ArgumentTypes = None
+    ) -> str | None:
         """The one member of *rep*'s set a call with *argument_count* arguments means.
 
         Asked in the order the languages apply: a member of exactly that arity,
@@ -925,10 +1084,12 @@ class CallResolver(LanguageStrategiesMixin, ReceiverTypingMixin):
         form), then one whose varargs or ``params`` expand to it. The first
         phase with any candidate decides, and two candidates there are a tie.
         """
-        found = self._deciding_overloads(rep, argument_count)
+        found = self._deciding_overloads(rep, argument_count, argument_types)
         return found[0] if len(found) == 1 else None
 
-    def _overload_target(self, rep: str, argument_count: int | None) -> str:
+    def _overload_target(
+        self, rep: str, argument_count: int | None, argument_types: _ArgumentTypes = None
+    ) -> str:
         """The member of *rep*'s set a call lands on.
 
         The member ``_pick_overload`` names, else the representative when the
@@ -942,7 +1103,7 @@ class CallResolver(LanguageStrategiesMixin, ReceiverTypingMixin):
         code judges as one unit and a constructor set needs for any inbound
         edge at all.
         """
-        found = self._deciding_overloads(rep, argument_count)
+        found = self._deciding_overloads(rep, argument_count, argument_types)
         if len(found) == 1:
             return found[0]
         tied = self._tied_without_representative(rep, found)
@@ -954,8 +1115,14 @@ class CallResolver(LanguageStrategiesMixin, ReceiverTypingMixin):
             return found
         return []
 
-    def _deciding_overloads(self, rep: str, argument_count: int | None) -> list[str]:
-        """The members of the first phase with any candidate for *argument_count*."""
+    def _deciding_overloads(
+        self, rep: str, argument_count: int | None, argument_types: _ArgumentTypes = None
+    ) -> list[str]:
+        """The members of the first phase with any candidate for *argument_count*.
+
+        A tie there is broken by *argument_types* when the literal arguments
+        fit exactly one member's parameters (``value(true)`` over ``value(String)``).
+        """
         if argument_count is None or rep in self._unranged_overload_sets:
             return []
         phases: dict[int, list[str]] = defaultdict(list)
@@ -963,7 +1130,19 @@ class CallResolver(LanguageStrategiesMixin, ReceiverTypingMixin):
             phase = _overload_phase(admitted, argument_count)
             if phase is not None:
                 phases[phase].append(member)
-        return phases[min(phases)] if phases else []
+        phase = min(phases, default=None)
+        found = phases[phase] if phases else []
+        return self._literal_tie_break(found, argument_types, expanded=phase == 2)
+
+    def _literal_tie_break(
+        self, found: list[str], argument_types: _ArgumentTypes, *, expanded: bool
+    ) -> list[str]:
+        """*found* narrowed to the one member its literal arguments fit closest, if one does."""
+        if len(found) < 2 or not argument_types:
+            return found
+        typed = [(m, erased_parameter_types(self._symbols_by_id[m])) for m in found]
+        closest = _closest_literal_fit(typed, argument_types, expanded)
+        return found if closest is None else [closest]
 
     def _overload_sibling_call(self, call: CallSite) -> ResolvedCall | None:
         """An overload calling another member of its own set, ``f(a)`` inside ``f(a, b)``.
@@ -977,7 +1156,7 @@ class CallResolver(LanguageStrategiesMixin, ReceiverTypingMixin):
             return None
         if self._symbols_by_id[caller_id].name != call.target_name:
             return None
-        target = self._pick_overload(rep, call.argument_count)
+        target = self._pick_overload(rep, call.argument_count, call.argument_types)
         if target is None or target == caller_id:
             return None
         return ResolvedCall(caller_id, target, 0.95, call.line, "same_file")
