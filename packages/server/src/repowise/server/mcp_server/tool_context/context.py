@@ -17,7 +17,9 @@ Optional ``include`` parameter widens the response:
   - include=["references"]→ every live edit site of a symbol (definition,
                             imports, calls, other mentions) and whether
                             the list is complete (symbol targets only)
-  - include=["ownership"] → primary owner, bus factor, contributor count
+  - include=["ownership"] → primary owner, bus factor, contributor count; on a
+                            component target, declared owners against recent
+                            activity, with findings
   - include=["last_change"]→ last commit date and author
   - include=["metrics"]   → PageRank, betweenness, percentile ranks
   - include=["community"] → community membership + neighbors
@@ -211,7 +213,12 @@ async def get_context(
         # Component and change targets resolve first, in turn on this session,
         # so they never share the session with the gather.
         cards = await _component_cards(
-            session, repository, [t for t in targets if is_component_target(t)], ctx, exclude_spec
+            session,
+            repository,
+            [t for t in targets if is_component_target(t)],
+            ctx,
+            exclude_spec,
+            ownership="ownership" in include_set,
         )
         cards |= await _change_cards(
             session, repository, [t for t in targets if is_change_target(t)], collector
@@ -342,7 +349,13 @@ async def get_context(
 
 
 async def _component_cards(
-    session: Any, repository: Any, targets: list[str], ctx: Any, exclude_spec: Any
+    session: Any,
+    repository: Any,
+    targets: list[str],
+    ctx: Any,
+    exclude_spec: Any,
+    *,
+    ownership: bool = False,
 ) -> dict[str, Any]:
     """Cards for the batch's component targets; a failure becomes each one's error."""
     if not targets:
@@ -355,6 +368,7 @@ async def _component_cards(
             repo_root=ctx.path,
             alias=ctx.alias,
             exclude_spec=exclude_spec,
+            ownership=ownership,
         )
     except Exception as exc:
         return {t: exc for t in targets}
