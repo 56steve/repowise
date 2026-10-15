@@ -207,6 +207,9 @@ def fit(
     """
     meta = meta or {}
     spec = _coerce_filters(_repair_names(spec, types), rows)
+    # parse_spec drops these too; a repaired name can make the repeat only now.
+    if spec.series and (spec.series == spec.x or spec.series in spec.y):
+        spec = spec.noted(f"series {spec.series!r} repeats x or y, so it was dropped", series=None)
     # "x" and "value" name the axis and the plotted value when no field has that name.
     if spec.sort and spec.sort[0] not in types:
         name, order = spec.sort
@@ -252,9 +255,20 @@ def fit(
             aggregate="sum" if size else "count",
             color=spec.color or measure,
         )
+    # A group that is also the x, a part of it or a plotted field would be its column
+    # twice. Dropped before the hierarchy fill, so a treemap left with none still nests.
+    taken = {spec.x, *spec.x_parts, *spec.y, *([spec.series] if spec.series else [])}
+    if spec.kind == "treemap" and (repeats := [g for g in spec.groups if g in taken]):
+        kept = tuple(g for g in spec.groups if g not in taken)
+        spec = spec.noted(
+            f"groups {repeats} are already the x or a plotted field, so they were left out"
+            + (f"; the treemap nests by {', '.join(kept)}" if kept else ""),
+            groups=kept,
+        )
     if spec.kind == "treemap" and not spec.groups and hierarchy:
         leaf = spec.x_parts[-1] if spec.x_parts else spec.x
-        above = tuple(hierarchy[: hierarchy.index(leaf)]) if leaf in hierarchy else ()
+        levels = hierarchy[: hierarchy.index(leaf)] if leaf in hierarchy else ()
+        above = tuple(h for h in levels if h not in taken)
         if above:
             spec = spec.noted(f"the treemap nests by {', '.join(above)}", groups=above)
     if spec.kind != "treemap" and (spec.groups or spec.color):

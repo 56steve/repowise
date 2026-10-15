@@ -790,6 +790,54 @@ def test_a_suggestion_says_what_it_gave_up():
     assert result["adjustments"] == ["filter dropped, so every row is charted"]
 
 
+_PACKAGES = {
+    "files": [
+        {"package": "core", "directory": "core/a", "file_path": "x.py", "nloc": 10, "score": 9.0},
+        {"package": "core", "directory": "core/b", "file_path": "y.py", "nloc": 30, "score": 5.0},
+        {"package": "web", "directory": "web/src", "file_path": "z.ts", "nloc": 5, "score": 7.0},
+    ]
+}
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"kind": "treemap", "x": "directory", "y": "nloc", "aggregate": "sum",
+         "groups": ["package", "directory"], "color": "package"},
+        {"kind": "treemap", "x": "file_path", "y": "nloc", "groups": ["package", "directory"],
+         "color": "directory"},
+        {"kind": "treemap", "x": "directory", "y": "nloc", "aggregate": "sum", "groups": ["nloc"]},
+        {"kind": "bar", "x": "directory", "y": "nloc", "aggregate": "sum", "series": "directory"},
+        {"kind": "scatter", "x": "nloc", "y": "score", "series": "nloc"},
+        {"kind": "heatmap", "x": "directory", "y": "nloc", "aggregate": "sum",
+         "series": "package", "color": "package"},
+        {"kind": "heatmap", "x": "package", "y": "nloc", "aggregate": "sum", "series": "directory",
+         "groups": ["package"]},
+        {"kind": "treemap", "x": "directory", "y": "nloc", "aggregate": "sum", "color": "nloc"},
+        {"kind": "treemap", "x": "directory", "y": "nloc", "aggregate": "sum", "color": "directory"},
+        {"kind": "treemap", "x": "directory", "y": "score", "aggregate": "avg", "weight": "nloc",
+         "color": "nloc"},
+        {"kind": "treemap", "x": "directory", "y": "nloc", "aggregate": "sum", "groups": ["package"],
+         "color": "package", "top": 1, "other": True},
+    ],
+)
+def test_one_field_in_two_roles_draws_one_column(options):
+    turn, receipt = _show_chart(_PACKAGES, rows="files", **options)
+    assert "error" not in receipt
+    ViewPartList.model_validate(turn.parts)
+    keys = [c["key"] for c in turn.parts[0]["data"]["columns"]]
+    assert len(keys) == len(set(keys))
+
+
+def test_a_repeated_person_field_is_refused_not_dropped():
+    data = {"files": [{**row, "owner": "ana"} for row in _PACKAGES["files"]]}
+    _, result = _show_chart(
+        data, rows="files", kind="treemap", x="directory", y="nloc", aggregate="sum",
+        groups=["owner", "directory"],
+    )
+    assert result["error_code"] == "person_grouping"
+
+
 def test_a_risk_score_is_refused_before_any_suggestion():
     _, result = _show_chart(RISK, rows="global_hotspots", x="file_path", y="hotspot_scroe")
     assert result["error_code"] == "risk_score_series"
