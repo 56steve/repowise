@@ -416,8 +416,10 @@ def ensure_manifest_tracked(repo_path: Path | str) -> bool:
 
 
 def _ensure_gitignored(repo_path: Path | str, pattern: str, comment: str) -> None:
-    """Add *pattern* to the repo's ``.gitignore`` if not already listed."""
+    """Add *pattern* to the repo's ``.gitignore`` unless git already ignores it."""
     gitignore = Path(repo_path) / ".gitignore"
+    if _git_ignores(repo_path, pattern):
+        return  # e.g. a ``.repowise/`` rule: a second line would only dirty the file
 
     if gitignore.exists():
         content = gitignore.read_text(encoding="utf-8")
@@ -431,3 +433,28 @@ def _ensure_gitignored(repo_path: Path | str, pattern: str, comment: str) -> Non
         gitignore.write_text(content, encoding="utf-8")
     else:
         gitignore.write_text(f"# {comment}\n{pattern}\n", encoding="utf-8")
+
+
+def _git_ignores(repo_path: Path | str, pattern: str) -> bool:
+    """Whether a ``.gitignore`` inside the repo already covers *pattern*.
+
+    Rules from ``.git/info/exclude`` or a global excludes file do not count:
+    teammates do not share them. ``False`` when git cannot say.
+    """
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["git", "check-ignore", "-v", "--no-index", pattern],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if result.returncode != 0:
+        return False
+    # ``<source>:<line>:<rule><TAB><path>``; a repo .gitignore is reported relative.
+    source = result.stdout.split("\t", 1)[0].rsplit(":", 2)[0]
+    return Path(source).name == ".gitignore" and not Path(source).is_absolute()

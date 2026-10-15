@@ -112,6 +112,8 @@ def change_title(subject: str, body: str, is_merge: bool) -> str:
     if subject.startswith(_BOILERPLATE_MERGE):
         for line in body.splitlines():
             line = line.strip()
+            if line in ("Conflicts:", "# Conflicts:"):
+                break  # git's conflict list, kept when a merge commit is not edited
             if line and not _TRAILER_LINE.match(line):
                 return line
     return subject
