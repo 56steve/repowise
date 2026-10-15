@@ -41,7 +41,8 @@ Grouped by what you're trying to do, not alphabetically. `PATH` and flag details
 [`coverage`](#repowise-coverage) ·
 [`components`](#repowise-components) ·
 [`changes`](#repowise-changes) ·
-[`events`](#repowise-events)
+[`events`](#repowise-events) ·
+[`report assessment`](#repowise-report-assessment-path)
 
 **Decisions**
 [`decision`](#repowise-decision)
@@ -1630,6 +1631,30 @@ repowise events [--path PATH] [--since 7d|12h|ISO-DATE] [--kind KIND]... [--limi
 ```
 
 Kinds: `ownership_shift`, `owner_inactive`, `bus_factor_drop` (critical components), `new_hotspot` (off by default), `contract_added`, `contract_broken`, `decision_stale`, `dead_code_growth`, `test_reach_drop`, `attribution_jump` (regulated components). The `events:` block in `.repowise/config.yaml` sets `enabled`, `retention_days` (365), `compact_after_days` (30; older runs keep one per week), per-kind switches under `kinds`, and the `sinks` to deliver to (`jsonl` by default, `stdout` for CI).
+
+---
+
+### `repowise report assessment [PATH]`
+
+One document a team hands to someone else, for a repo or every repo of a workspace: component posture, hotspots, bus factor per component, dead code by tier, measured and inferred test reach, contracts, governing decisions, provenance coverage with the agents and models named, and what moved since a snapshot a quarter older. Every item keeps the OpenSSF Scorecard check keys (`name`, `score` 0 to 10 or -1 inconclusive, `reason`, `details`, `documentation`) plus `method` and `basis`. A descriptive item (a count or a list) has `score: null`, and missing or held-back evidence is always -1, never a low score. The report is evidence about code and components, not a score of people: owners are counted, never ranked or named. JSON is canonical (`schema_version: 1`); the HTML is one file with inline CSS, no scripts and a policy that blocks every fetch, so it opens offline and prints as is.
+
+```bash
+repowise report assessment [PATH] [--sections a,b] [--format json|markdown|html] [--out FILE] [--workspace | --no-workspace] [--repo ALIAS]
+```
+
+| Section | Measures | Basis |
+|---|---|---|
+| `components` | Each component's NLOC-weighted health, catalog facts and `components ownership` findings | `measured`; `gated` on a language health is held back on |
+| `hotspots` | Files with high recent churn, per component | `measured` |
+| `bus-factor` | Fewest primary owners holding over half of each component's owned files; components at 1 or 2 are counted and named in the summary unless the catalog marks them | `measured`; `inferred` under five owned files |
+| `dead-code` | Open findings by confidence tier; `safe_to_delete` is not used | `inferred`; `gated` for held-back languages |
+| `test-reach` | Line coverage from ingested reports, and production files a test reaches, as separate items | `measured` and `inferred` |
+| `contracts` | Contracts each component provides and their consumers in other repos | `measured` when the workspace store matches the indexed commit |
+| `decisions` | Accepted decisions governing each component's files, and the stale ones | `declared` |
+| `provenance` | Commits in the last 90 indexed days with a known source (a count, not a score), and the agents and models named (listed, not counted) | `measured`, `declared`; `unresolved` with no markers |
+| `trend` | What moved since a same-stamp snapshot at least 90 days older, by the `events` diff rules and only for the event kinds the repository has on | `measured` |
+
+Basis `unresolved` means the evidence is missing. Each per-component section opens with one summary row counting components by outcome; a component gets its own item only when there is something to note (an ownership finding, a bus factor of 2 or less on a component the catalog gives a criticality or tags, hotspots, a stale decision, provided contracts, or unresolved or gated evidence), the rest are named in the summary, and the JSON `data` keeps every component's figures. Local paths are removed from every item. A section is a `Section` on `SeamRegistry("report-section")`: each module in `repowise/core/report/sections/` registers one, a plugin registers its own the same way, and a section whose data is absent returns `None` and is left out (an outcomes section is added this way once change outcomes exist). Renderers live on `SeamRegistry("report-renderer")` and are picked with `--format`. Modernization candidates are not reported, since no existing signal measures them.
 
 ---
 
