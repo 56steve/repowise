@@ -547,6 +547,7 @@ export interface ChatFigure {
   end: number;
   verified: boolean;
   artifact_id?: string | null;
+  derived?: boolean;
 }
 
 export interface ChatMessageResponse {
@@ -1598,6 +1599,9 @@ export interface EpisodeSummary {
 
 export interface EventListResponse {
   events: CloudEvent[];
+  snapshot_runs?: number;
+  empty_reason?: "baseline_only" | "no_match" | "nothing_moved" | null;
+  empty_note?: string | null;
 }
 
 /** One checklist row: what was found, whether it needs a look, how it is known. */
@@ -1609,6 +1613,13 @@ export interface EvidenceItem {
   value?: unknown;
   details: Record<string, unknown>[];
   source: string;
+  line?: EvidenceLine | null;
+}
+
+/** An item's value as a message key and its parameters, for a client to word. */
+export interface EvidenceLine {
+  key: string;
+  params: Record<string, unknown>;
 }
 
 /** The top-ranked evidence row, slimmed for list rows. */
@@ -2600,6 +2611,7 @@ export interface OwnerListEntry {
   dead_code_files_owned: number;
   dead_code_lines_owned: number;
   commit_count_90d: number | null;
+  commit_count_90d_at_least?: number | null;
   last_commit_at: string | null;
   bus_factor_risk_files: number;
 }
@@ -2621,6 +2633,7 @@ export interface OwnerProfileResponse {
   dead_code_files_owned: number;
   dead_code_lines_owned: number;
   commit_count_90d: number | null;
+  commit_count_90d_at_least?: number | null;
   last_commit_at: string | null;
   first_commit_at: string | null;
   bus_factor_risk_files: number;
