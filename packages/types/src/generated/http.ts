@@ -2262,6 +2262,8 @@ export interface HealthTrendResponse {
   alerts?: HealthTrendAlert[];
   file_deltas?: HealthFileDelta[];
   file_deltas_total?: number;
+  file_deltas_worse?: number;
+  file_deltas_improved?: number;
   snapshot_count?: number;
   scope?: string;
 }
