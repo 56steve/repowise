@@ -106,6 +106,7 @@ export interface ActiveProviderSelection {
 export interface AgentPromptResponse {
   flavor: "generic" | "claude-code" | "claude-code-mcp" | "cursor";
   text: string;
+  preview?: string | null;
 }
 
 /** One month of commits by attribution label. */
@@ -1133,6 +1134,7 @@ export interface DeadCodeFindingResponse {
   last_commit_at: string | null;
   commit_count_90d: number;
   verification?: string | null;
+  preview?: string | null;
 }
 
 export interface DeadCodeGraphNodeResponse {
@@ -2184,6 +2186,7 @@ export interface HealthFindingResponse {
   dimension?: string;
   verification?: string | null;
   lower_priority?: string | null;
+  preview?: string | null;
 }
 
 /**
@@ -2207,6 +2210,7 @@ export interface HealthFindingWithSymbolResponse {
   dimension?: string;
   verification?: string | null;
   lower_priority?: string | null;
+  preview?: string | null;
   symbol_id?: string | null;
 }
 
@@ -2283,6 +2287,7 @@ export interface HealthWorkItem {
   biomarkers?: string[];
   effort_bucket: string;
   impact_per_effort: number;
+  preview?: string | null;
 }
 
 export interface HealthWorkQueueResponse {
@@ -3122,6 +3127,7 @@ export interface RefactoringOpportunityDetailResponse {
   next_actions?: Record<string, unknown>[];
   plans?: Record<string, unknown>[] | null;
   ordering_note?: string | null;
+  preview?: string | null;
 }
 
 /** What one opportunity-level triage decision wrote. */
@@ -3166,6 +3172,7 @@ export interface RefactoringPlanDetailResponse {
   file_nloc?: number;
   file_weighted_deficit?: number;
   validation?: Record<string, unknown>;
+  preview?: string | null;
   governed_by?: string[] | null;
   risks?: PlanRiskResponse[] | null;
   recipe?: Record<string, unknown> | null;
@@ -3199,6 +3206,7 @@ export interface RefactoringPlanResponse {
   file_nloc?: number;
   file_weighted_deficit?: number;
   validation?: Record<string, unknown>;
+  preview?: string | null;
 }
 
 /** What one plan-level triage decision wrote. */
@@ -3286,6 +3294,7 @@ export interface RelatedWorkItem {
 export interface RelatedWorkLens {
   items?: RelatedWorkItem[];
   total?: number;
+  preview?: string | null;
 }
 
 /** The files to look up, repo-relative. Validated by the route. */
