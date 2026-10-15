@@ -13,8 +13,13 @@ from repowise.core.changes.collect import (
     build_stored_evidence,
     cached_evidence,
     evidence_summary,
+    keep_outcomes,
     list_needing_attention,
+    outcomes_item,
+    outcomes_key,
+    outcomes_stale,
     save_evidence,
+    with_item,
 )
 from repowise.core.changes.evidence import ChangeEvidence
 from repowise.core.changes.record import change_record
@@ -42,7 +47,9 @@ _MAX_PAGE = 200
 EVIDENCE_WAIT_SECONDS = 15.0
 
 #: One build per change at a time, shared by every request that asks.
-_BUILDS: dict[tuple[str, str], asyncio.Task[ChangeEvidence]] = {}
+#: Keyed by ``(repo, change, "full" | "outcomes")``: a refresh asked while
+#: only outcomes are being read starts its own full build.
+_BUILDS: dict[tuple[str, str, str], asyncio.Task[ChangeEvidence]] = {}
 
 
 async def _attribution(session: AsyncSession, repo_id: str) -> bool:
@@ -117,10 +124,15 @@ async def get_change(
     record = change_record(row, attribution=attribution)
     if evidence:
         kept = None if refresh else cached_evidence(row)
+        repo = await crud.get_repository(session, repo_id)
+        # A kept checklist is current but for ``outcomes``, which follows HEAD.
+        task = None
+        factory = resolve_request_session_factory(request)
         if kept is None:
-            repo = await crud.get_repository(session, repo_id)
-            factory = resolve_request_session_factory(request)
             task = _build(factory, repo_id, row.change_id, repo.local_path)
+        elif await outcomes_stale(repo.local_path, kept):
+            task = _build(factory, repo_id, row.change_id, repo.local_path, kept)
+        if task is not None:
             try:
                 kept = await asyncio.wait_for(asyncio.shield(task), EVIDENCE_WAIT_SECONDS)
             except TimeoutError:
@@ -130,12 +142,26 @@ async def get_change(
     return ChangeRecord(**record, commit_count=len(record["commits"]))
 
 
-def _build(factory: Any, repo_id: str, change_id: str, root: str) -> asyncio.Task[ChangeEvidence]:
-    """The running build for this change, or a new one; a finished build leaves the map."""
-    key = (repo_id, change_id)
+def _build(
+    factory: Any, repo_id: str, change_id: str, root: str, kept: ChangeEvidence | None = None
+) -> asyncio.Task[ChangeEvidence]:
+    """The running build for this change, or a new one; a finished build leaves the map.
+
+    Without *kept* the whole checklist is built. With it only its outcomes are
+    read again, unless a full build is already running, which reads them too.
+    """
+    full = (repo_id, change_id, "full")
+    if kept is not None and full in _BUILDS:
+        return _BUILDS[full]
+    key = full if kept is None else (repo_id, change_id, "outcomes")
     task = _BUILDS.get(key)
     if task is None:
-        task = asyncio.create_task(_build_and_keep(factory, repo_id, change_id, root))
+        job = (
+            _build_and_keep(factory, repo_id, change_id, root)
+            if kept is None
+            else _outcomes_and_keep(factory, repo_id, change_id, root, kept)
+        )
+        task = asyncio.create_task(job)
         _BUILDS[key] = task
         task.add_done_callback(lambda _t: _BUILDS.pop(key, None))
     return task
@@ -149,3 +175,16 @@ async def _build_and_keep(factory: Any, repo_id: str, change_id: str, root: str)
     async with get_session(factory) as session:
         await save_evidence(session, repo_id, change_id, evidence)
     return evidence
+
+
+async def _outcomes_and_keep(
+    factory: Any, repo_id: str, change_id: str, root: str, kept: ChangeEvidence
+) -> ChangeEvidence:
+    """Read the outcomes item, then merge only it into what is stored by then."""
+    key = await outcomes_key(root)
+    async with get_session(factory) as session:
+        row = await crud.get_change(session, repo_id, change_id)
+        item = await outcomes_item(session, repo_id, root, row, key)
+    async with get_session(factory) as session:
+        merged = await keep_outcomes(session, repo_id, change_id, item)
+    return merged or with_item(kept, item)
