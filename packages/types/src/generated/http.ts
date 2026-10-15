@@ -390,6 +390,14 @@ export interface ChangeEvidence {
   items: EvidenceItem[];
 }
 
+/** Status counts of a change's kept checklist; never builds one. */
+export interface ChangeEvidenceSummary {
+  generated_at: string;
+  ok: number;
+  attention: number;
+  unknown: number;
+}
+
 /** The Kamei change-shape features the risk model scores. */
 export interface ChangeFeaturesResponse {
   la: number;
@@ -422,12 +430,33 @@ export interface ChangeIdentity {
   value: string;
 }
 
+export interface ChangeListItem {
+  schema_version: number;
+  id: string;
+  identity: ChangeIdentity;
+  shape: string;
+  forge: string;
+  forge_ref?: string | null;
+  title: string;
+  merged_at?: string | null;
+  head_sha: string;
+  author: ChangeAuthor;
+  commit_count: number;
+  files_changed: number;
+  lines_added: number;
+  lines_deleted: number;
+  category: string;
+  provenance?: ChangeProvenance | null;
+  evidence_summary?: ChangeEvidenceSummary | null;
+}
+
 export interface ChangeListResponse {
-  items: ChangeSummary[];
+  items: ChangeListItem[];
   total: number;
   limit: number;
   offset: number;
   attribution: boolean;
+  checklists_built?: ChecklistsBuilt | null;
 }
 
 /** Three-state AI provenance over the change's commits, with its coverage. */
@@ -461,25 +490,6 @@ export interface ChangeRecord {
   metadata: ChangeForgeMetadata;
   evidence?: ChangeEvidence | null;
   evidence_building?: boolean;
-}
-
-export interface ChangeSummary {
-  schema_version: number;
-  id: string;
-  identity: ChangeIdentity;
-  shape: string;
-  forge: string;
-  forge_ref?: string | null;
-  title: string;
-  merged_at?: string | null;
-  head_sha: string;
-  author: ChangeAuthor;
-  commit_count: number;
-  files_changed: number;
-  lines_added: number;
-  lines_deleted: number;
-  category: string;
-  provenance?: ChangeProvenance | null;
 }
 
 export interface ChangelogEntryModel {
@@ -661,6 +671,12 @@ export interface ChatTurnUsage {
   input_tokens?: number | null;
   output_tokens?: number | null;
   model_calls?: number;
+}
+
+/** How many of the changes a list's filters match keep an evidence checklist. */
+export interface ChecklistsBuilt {
+  built: number;
+  changes: number;
 }
 
 /**

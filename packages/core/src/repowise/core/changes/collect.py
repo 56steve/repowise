@@ -19,7 +19,7 @@ import json
 import re
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
@@ -35,6 +35,9 @@ from repowise.core.ownership.codeowners import (
     parse_codeowners,
     read_codeowners,
 )
+
+if TYPE_CHECKING:
+    from repowise.core.persistence.crud import ChangeFilter
 
 logger = structlog.get_logger(__name__)
 
@@ -204,12 +207,13 @@ async def save_evidence(
     """Keep *evidence* on its change row."""
     from sqlalchemy import update
 
+    from repowise.core.persistence.crud.changes import dump_evidence
     from repowise.core.persistence.models import Change
 
     await session.execute(
         update(Change)
         .where(Change.repository_id == repo_id, Change.change_id == change_id)
-        .values(evidence_json=json.dumps(evidence.to_dict()))
+        .values(evidence_json=dump_evidence(evidence.to_dict()))
     )
 
 
@@ -229,7 +233,9 @@ async def change_evidence(
     evidence = await build_stored_evidence(
         session, repo_id, repo_root, row, risk=risk, health=health
     )
-    row.evidence_json = json.dumps(evidence.to_dict())
+    from repowise.core.persistence.crud.changes import dump_evidence
+
+    row.evidence_json = dump_evidence(evidence.to_dict())
     await session.flush()
     return evidence
 
@@ -260,6 +266,45 @@ def cached_evidence(row: Any) -> ChangeEvidence | None:
     except (TypeError, ValueError, KeyError):
         return None
     return evidence if evidence.schema_version == EVIDENCE_SCHEMA_VERSION else None
+
+
+def evidence_summary(row: Any) -> dict[str, Any] | None:
+    """Status counts of the kept checklist, or ``None`` when none is kept."""
+    evidence = cached_evidence(row)
+    if evidence is None:
+        return None
+    counts = {"generated_at": evidence.generated_at, "ok": 0, "attention": 0, "unknown": 0}
+    for item in evidence.items:
+        # A status this reader does not know is not a pass.
+        counts[item.status if item.status in ("ok", "attention") else "unknown"] += 1
+    return counts
+
+
+async def list_needing_attention(
+    session: Any,
+    repo_id: str,
+    where: ChangeFilter | None = None,
+    *,
+    limit: int | None,
+    offset: int = 0,
+) -> tuple[list[Any], int]:
+    """Changes matching *where* whose kept checklist flags attention, newest
+    merged first, and their total. Reads kept checklists only, never builds one.
+    """
+    from repowise.core.persistence.crud import (
+        ChangeFilter,
+        list_attention_candidates,
+        list_changes,
+    )
+
+    # Checklists are built on first view, so the prefiltered set stays small;
+    # confirm on the parsed evidence, then page here. Ceiling: if checklists
+    # are ever built in bulk, move this filter into SQL.
+    candidates = await list_attention_candidates(session, repo_id, where)
+    ids = [r.change_id for r in candidates if (evidence_summary(r) or {}).get("attention")]
+    page = ids[offset:] if limit is None else ids[offset : offset + limit]
+    rows, _ = await list_changes(session, repo_id, ChangeFilter(change_ids=page), limit=None)
+    return rows, len(ids)
 
 
 # -- inputs -------------------------------------------------------------------

@@ -13,7 +13,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING
 
 import click
 
@@ -25,6 +25,9 @@ from repowise.cli.helpers import (
     silence_logs_for_machine_output_until_close,
 )
 from repowise.cli.output import emit_json, format_option
+
+if TYPE_CHECKING:
+    from repowise.core.persistence.crud import ChangeFilter
 
 
 def _repo_root(path: str | None) -> Path:
@@ -38,8 +41,11 @@ def _no_index() -> None:
     raise SystemExit(1)
 
 
-async def _list(root: Path, **filters: Any) -> tuple[list[dict], int] | None:
+async def _list(
+    root: Path, where: ChangeFilter, *, limit: int, offset: int, needs_attention: bool = False
+) -> tuple[list[dict], int] | None:
     from repowise.core.attribution import attribution_enabled
+    from repowise.core.changes.collect import list_needing_attention
     from repowise.core.changes.record import change_record
     from repowise.core.persistence.crud import list_changes
 
@@ -47,7 +53,8 @@ async def _list(root: Path, **filters: Any) -> tuple[list[dict], int] | None:
         if opened is None:
             return None
         session, repo_id = opened
-        rows, total = await list_changes(session, repo_id, **filters)
+        read = list_needing_attention if needs_attention else list_changes
+        rows, total = await read(session, repo_id, where, limit=limit, offset=offset)
         on = attribution_enabled(root)
         return [change_record(r, attribution=on) for r in rows], total
 
@@ -87,7 +94,7 @@ async def _export(
     from repowise.core.attribution import attribution_enabled
     from repowise.core.changes.collect import change_evidence
     from repowise.core.changes.record import change_record
-    from repowise.core.persistence.crud import list_changes
+    from repowise.core.persistence.crud import ChangeFilter, list_changes
 
     async with repo_index_session(root) as opened:
         if opened is None:
@@ -97,7 +104,11 @@ async def _export(
         done = 0
         while True:
             rows, total = await list_changes(
-                session, repo_id, since=since, until=until, limit=_EXPORT_PAGE, offset=done
+                session,
+                repo_id,
+                ChangeFilter(since=since, until=until),
+                limit=_EXPORT_PAGE,
+                offset=done,
             )
             for row in rows:
                 done += 1
@@ -198,6 +209,11 @@ def changes_group() -> None:
     "--shape", type=click.Choice(["merge", "squash", "commit"]), default=None, help="Only this shape."
 )
 @click.option("--grep", "q", default=None, help="Substring of the title, id or a file path.")
+@click.option(
+    "--needs-attention",
+    is_flag=True,
+    help="Only changes whose kept checklist flags attention (never builds one).",
+)
 @click.option("--limit", default=30, show_default=True, type=click.IntRange(1, 1000))
 @click.option("--offset", default=0, type=click.IntRange(0))
 @format_option()
@@ -206,14 +222,18 @@ def changes_list(
     category: str | None,
     shape: str | None,
     q: str | None,
+    needs_attention: bool,
     limit: int,
     offset: int,
     fmt: str,
 ) -> None:
     """List indexed changes, newest merged first."""
+    from repowise.core.persistence.crud import ChangeFilter
+
     root = _repo_root(repo)
+    where = ChangeFilter(category=category, shape=shape, q=q)
     got = run_async(
-        _list(root, category=category, shape=shape, q=q, limit=limit, offset=offset)
+        _list(root, where, limit=limit, offset=offset, needs_attention=needs_attention)
     )
     if got is None:
         _no_index()
