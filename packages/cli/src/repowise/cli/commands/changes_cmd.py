@@ -81,8 +81,24 @@ async def _show(root: Path, ref: str, *, evidence: bool, refresh: bool) -> dict 
         return record
 
 
-#: Changes read from the index per page during an export.
-_EXPORT_PAGE = 50
+def build_progress(position: int, total: int, change_id: str) -> None:
+    """One stderr line per checklist built, so a long period shows it is moving."""
+    click.echo(f"evidence {position}/{total}: {change_id}", err=True)
+
+
+def build_plan(to_build: int, total: int) -> None:
+    """Say up front how many checklists a period builds, and roughly how long."""
+    from repowise.core.changes.period import SECONDS_PER_BUILD
+
+    if not to_build:
+        return
+    minutes = to_build * SECONDS_PER_BUILD / 60
+    about = f"about {minutes:.0f} min" if minutes >= 1 else "under a minute"
+    click.echo(
+        f"building {to_build} of {total} evidence checklist(s), {about}; each is kept, "
+        "so a later run reads it back",
+        err=True,
+    )
 
 
 async def _export(
@@ -94,40 +110,24 @@ async def _export(
 ) -> int | None:
     """Emit each change in the window with its checklist, a page at a time; the count."""
     from repowise.core.attribution import attribution_enabled
-    from repowise.core.changes.collect import change_evidence, outcomes_key
+    from repowise.core.changes.period import PeriodRequest, period_evidence
     from repowise.core.changes.record import change_record
-    from repowise.core.persistence.crud import ChangeFilter, list_changes
 
     async with repo_index_session(root) as opened:
         if opened is None:
             return None
         session, repo_id = opened
         on = attribution_enabled(root)
-        # One HEAD and window for the whole export, read once.
-        key = await outcomes_key(root)
         done = 0
-        while True:
-            rows, total = await list_changes(
-                session,
-                repo_id,
-                ChangeFilter(since=since, until=until),
-                limit=_EXPORT_PAGE,
-                offset=done,
-            )
-            for row in rows:
-                done += 1
-                if refresh or not row.evidence_json:
-                    click.echo(f"evidence {done}/{total}: {row.change_id}", err=True)
-                record = change_record(row, attribution=on)
-                record["evidence"] = (
-                    await change_evidence(session, repo_id, root, row, refresh=refresh, key=key)
-                ).to_dict()
-                # Kept as it goes, so an interrupted export resumes where it stopped.
-                await session.commit()
-                emit(record)
-            session.expunge_all()
-            if len(rows) < _EXPORT_PAGE:
-                return done
+        request = PeriodRequest(
+            since=since, until=until, refresh=refresh, progress=build_progress, plan=build_plan
+        )
+        async for row, evidence in period_evidence(session, repo_id, root, request):
+            record = change_record(row, attribution=on)
+            record["evidence"] = evidence.to_dict()
+            emit(record)
+            done += 1
+        return done
 
 
 _STATUS_STYLE = {"ok": "green", "attention": "yellow", "unknown": "dim"}
@@ -195,28 +195,19 @@ _CSV_COLUMNS = (
 )
 
 
-_FORMULA_LEAD = ("=", "+", "-", "@")
-
-
-def _cell(value: str) -> str:
-    """*value* safe to open in a spreadsheet: a leading formula sign is quoted.
-
-    Titles and evidence quote commit messages, which anyone can write.
-    """
-    return f"'{value}" if value.startswith(_FORMULA_LEAD) else value
-
-
 def _csv_rows(record: dict) -> str:
     """One CSV row per evidence item of *record*; ``value`` is its JSON."""
     import csv
     import io
     import json
 
+    from repowise.core.report.render import spreadsheet_cell
+
     buf = io.StringIO()
     writer = csv.writer(buf, lineterminator="\n")
     for item in record["evidence"]["items"]:
         writer.writerow(
-            _cell(cell)
+            spreadsheet_cell(cell)
             for cell in [
                 record["id"],
                 record["merged_at"] or "",
@@ -376,10 +367,10 @@ def changes_export(
 ) -> None:
     """Export the changes merged in a window, each with its evidence checklist.
 
-    A change without a kept checklist has one built and kept first, which
-    costs a few seconds per change (about 7 to 9s measured on a mid-size
-    repository); kept checklists are read back at no cost. Records stream as
-    they are ready, and progress goes to stderr.
+    A change without a kept checklist has one built and kept first, a few at
+    a time over one shared fix-history walk (about 3s per change measured on
+    a mid-size repository, from 6s one by one); kept checklists are read back
+    at no cost. Records stream a page at a time, and progress goes to stderr.
     """
     import json
     from datetime import UTC
