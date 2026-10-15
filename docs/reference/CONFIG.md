@@ -108,7 +108,7 @@ embedder: mock                       # Embedding provider (mock if no key detect
 embedding_model: text-embedding-3-small  # Embedding model (provider default if omitted)
 reasoning: auto                      # auto | off | none | minimal | low | medium | high | xhigh | max
 max_tokens: 16384                    # Max output tokens for each generated documentation page
-commit_limit: 500                    # Max commits per file for git analysis (clamped 1-10000)
+commit_limit: 5000                   # Max commits per file for git analysis (clamped 1-10000)
 follow_renames: false                # Track file renames in git history
 wiki_style: comprehensive            # comprehensive | caveman | reference | tutorial | custom
 language: en                         # Output language for generated pages (en, zh, ru, hi, ...)
@@ -150,7 +150,7 @@ You can edit this file directly. Changes take effect on the next `init`,
 | `embedding_model` | provider default | Embedding model identifier |
 | `reasoning` | `auto` | `auto`, `off`, `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` |
 | `max_tokens` | `16384` | Maximum output tokens requested for each model-written documentation page |
-| `commit_limit` | `500` | Max commits per file walked for git analysis, clamped to 1-10000 |
+| `commit_limit` | `5000` | Newest commits walked for git analysis and stored as commit rows, clamped to 1-10000 |
 | `follow_renames` | `false` | Track file renames through git history |
 | `exclude_patterns` | `[]` | Extra gitignore-style patterns, on top of `.gitignore` |
 | `wiki_style` | `comprehensive` | `comprehensive`, `caveman`, `reference`, `tutorial`, `custom` |
@@ -162,6 +162,12 @@ You can edit this file directly. Changes take effect on the next `init`,
 | `mcp` | see below | MCP tool surface config |
 | `refactoring` | see below | Refactoring-intelligence config |
 | `forges.hosts` | `{}` | Maps a self-managed git host to its forge (`github`, `gitlab`, `azure`, `bitbucket`, `generic`). See [GIT_HOSTS.md](../start/GIT_HOSTS.md#self-managed-hosts) |
+
+`commit_limit` sets how far back history-based signals see: churn, co-change,
+the commit list and change records. The first `repowise update` after upgrading
+re-reads the history once, with no model calls. A `commit_limit` written in
+`config.yaml` is kept as set, and when it is below the default `repowise update`
+says so once.
 
 `reasoning` controls documentation-generation calls for reasoning-capable chat
 models. `auto` preserves provider defaults. `off`/`none` disable Qwen3-style
