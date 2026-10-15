@@ -946,7 +946,33 @@
     "cancelled": "任务已取消",
     "cancelledDescription": "流水线在完成之前就被停止了。",
     "cancelFailed": "无法取消任务",
-    "progressCount": "{completed}/{total} 个页面"
+    "progressCount": "{completed}/{total} 个页面",
+    "completedWithProblems": "已完成，但存在问题{name}",
+    "pagesFailed": "有 {count} 个页面未能写入。",
+    "progress": {
+      "warningTitle": "已完成，但存在问题",
+      "noPagesWritten": "没有写入任何文档页面。",
+      "somePagesFailed": "{total} 个页面中有 {failed} 个未能写入。再次运行即可重试这些页面。",
+      "docsSkipped": "文档未更新。",
+      "retry": "重试",
+      "startAgain": "重新开始",
+      "providerSettings": "模型提供方设置",
+      "dismiss": "关闭"
+    },
+    "issue": {
+      "auth": "{provider} 拒绝了 API 密钥。请在设置中更新。",
+      "rate_limit": "{provider} 正在限制请求频率。请等待几分钟后再运行。",
+      "model_not_found": "在 {provider} 上找不到模型 {model}。请在设置中选择其他模型。",
+      "not_found": "在 {provider} 上找不到模型 {model} 或基础 URL 路径。请在设置中检查这两项。",
+      "unreachable": "无法连接到 {target}。请确认服务器正在运行且基础 URL 正确。",
+      "docs_skipped": "已配置模型提供方，但无法加载，因此文档未更新。请在设置中检查。"
+    },
+    "banner": {
+      "finishedWithProblems": "{action}已完成，但存在问题",
+      "pagesFailed": "{count} 个页面未写入",
+      "providerSettings": "模型提供方设置",
+      "dismiss": "关闭"
+    }
   },
   "overview": {
     "ask": {
