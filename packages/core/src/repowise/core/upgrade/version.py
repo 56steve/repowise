@@ -95,6 +95,8 @@ STORE_FORMAT_VERSION: int = 2
 #: argument.
 #: A Kotlin call whose only argument is a trailing lambda (``AppTheme { }``,
 #: ``s.forEachSegment { }``) is a call site, with one argument.
+#: A Kotlin ``typealias`` signature carries its target (``typealias Repo =
+#: DefaultRepository``), so a call through the alias reaches the repo class.
 PARSER_SCHEMA_VERSION: int = 8
 
 #: state.json key holding the store format version that wrote the store.
