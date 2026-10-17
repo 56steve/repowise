@@ -889,7 +889,37 @@ def _attribute_decorators(def_node: Node, language: str, src: str) -> list[str]:
     # (NOT a preceding sibling at translation_unit level).
     if language in ("cpp", "c"):
         return _leading_child_attributes(def_node, "attribute_declaration", "[[", "]]", src)
+    if language == "kotlin":
+        return _kotlin_detached_annotation(def_node, src)
     return []
+
+
+def _kotlin_detached_annotation(def_node: Node, src: str) -> list[str]:
+    """Kotlin: annotations the grammar split off a top-level declaration.
+
+    When the last annotation on its own line before a bare ``fun`` or
+    ``object`` takes one argument (``@Suppress("unused")``), the argument list
+    reads as a parenthesized expression: the annotations become an
+    ``annotated_expression`` chain beside a declaration with no modifiers.
+    """
+    if def_node.parent is None or def_node.parent.type != "source_file":
+        return []
+    sib = def_node.prev_sibling
+    while sib is not None and sib.type in ("line_comment", "block_comment"):
+        sib = sib.prev_sibling
+    return [_node_text(sib, src).strip()] if _is_split_annotation_chain(sib) else []
+
+
+def _is_split_annotation_chain(node: Node | None) -> bool:
+    """Nested ``annotated_expression`` nodes of annotations, the last one's argument at the tail."""
+    while node is not None and node.type == "annotated_expression":
+        kinds = [c.type for c in node.named_children]
+        if len(kinds) != 2 or kinds[0] != "annotation":
+            return False
+        if kinds[1] == "parenthesized_expression":
+            return True
+        node = node.named_children[1]
+    return False
 
 
 def _declared_modifiers(def_node: Node, node_types: frozenset[str], src: str) -> tuple[str, ...]:
