@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from datetime import UTC
 from pathlib import Path
 
 import click
 from rich.table import Table
 
 from repowise.cli._setup import configure_cli_logging
-from repowise.cli.helpers import console, resolve_repo_path, run_async
+from repowise.cli.commands.status_cmd import _format_relative_time, _query_repo_counts
+from repowise.cli.helpers import console, resolve_repo_path
 
 from ._index import _resolve_docs_flag, _run_index_for_repo
 from ._shared import _require_workspace
@@ -99,86 +99,6 @@ def workspace_list(path: str | None) -> None:
     if ws_config.default_repo:
         summary += f" Default: {ws_config.default_repo}"
     console.print(summary)
-
-
-def _query_repo_counts(repo_path: Path) -> tuple[int, int]:
-    """Return ``(file_count, symbol_count)`` from a repo's DB, or ``(0, 0)``."""
-    from repowise.cli.helpers import get_db_url_for_repo, get_repowise_dir
-
-    db_path = get_repowise_dir(repo_path) / "wiki.db"
-    if not db_path.exists():
-        return 0, 0
-
-    async def _query() -> tuple[int, int]:
-        from sqlalchemy import func as sa_func
-        from sqlalchemy import select as sa_select
-
-        from repowise.core.persistence import (
-            create_engine,
-            create_session_factory,
-            get_session,
-        )
-        from repowise.core.persistence.models import GraphNode, Repository
-
-        url = get_db_url_for_repo(repo_path)
-        engine = create_engine(url)
-        sf = create_session_factory(engine)
-        try:
-            async with get_session(sf) as session:
-                repo_result = await session.execute(
-                    sa_select(Repository.id).where(Repository.local_path == str(repo_path))
-                )
-                repo_id = repo_result.scalar_one_or_none()
-                if repo_id is None:
-                    return 0, 0
-                file_result = await session.execute(
-                    sa_select(sa_func.count())
-                    .select_from(GraphNode)
-                    .where(
-                        GraphNode.repository_id == repo_id,
-                        GraphNode.node_type == "file",
-                    )
-                )
-                symbol_result = await session.execute(
-                    sa_select(sa_func.count())
-                    .select_from(GraphNode)
-                    .where(
-                        GraphNode.repository_id == repo_id,
-                        GraphNode.node_type == "symbol",
-                    )
-                )
-                return file_result.scalar_one(), symbol_result.scalar_one()
-        finally:
-            await engine.dispose()
-
-    try:
-        return run_async(_query())
-    except Exception:
-        return 0, 0
-
-
-def _format_relative_time(iso_timestamp: str | None) -> str:
-    """Format an ISO 8601 timestamp as a human-readable relative string."""
-    if not iso_timestamp:
-        return "-"
-    try:
-        from datetime import datetime
-
-        dt = datetime.fromisoformat(iso_timestamp)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=UTC)
-        now = datetime.now(UTC)
-        delta = now - dt
-        seconds = int(delta.total_seconds())
-        if seconds < 60:
-            return f"{seconds}s ago"
-        if seconds < 3600:
-            return f"{seconds // 60}m ago"
-        if seconds < 86400:
-            return f"{seconds // 3600}h ago"
-        return f"{seconds // 86400}d ago"
-    except Exception:
-        return iso_timestamp[:10] if len(iso_timestamp) >= 10 else iso_timestamp
 
 
 # ---------------------------------------------------------------------------

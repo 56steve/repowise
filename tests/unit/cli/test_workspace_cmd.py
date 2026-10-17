@@ -87,6 +87,25 @@ class TestWorkspaceList:
         # Summary line: "X/Y repos indexed"
         assert "repos indexed" in result.output
 
+    def test_list_counts_from_configured_db_url(self, runner, tmp_path, monkeypatch):
+        # A configured DB URL with no local wiki.db still has counts to show.
+        from repowise.cli.commands import status_cmd
+
+        repo = tmp_path / "svc"
+        (repo / ".repowise").mkdir(parents=True)
+        _write_workspace_config(tmp_path, repos=[{"path": "svc", "alias": "svc"}])
+        monkeypatch.setenv("REPOWISE_DB_URL", f"sqlite+aiosqlite:///{tmp_path / 'shared.db'}")
+
+        def _fake_run_async(coro):
+            coro.close()
+            return 7, 4321
+
+        monkeypatch.setattr(status_cmd, "run_async", _fake_run_async)
+
+        result = runner.invoke(cli, ["workspace", "list", str(tmp_path)])
+        assert result.exit_code == 0, result.output
+        assert "4,321" in result.output
+
     def test_list_marks_primary_repo(self, runner, tmp_path):
         repo_a = tmp_path / "main-svc"
         repo_a.mkdir()
@@ -635,6 +654,27 @@ class TestWorkspaceDiagnosticsReport:
         assert data["unmatched_by_reason"] == {"no_provider": 1, "mystery": 1}
         assert data["http_consumer_coverage"] == 0.75
         assert data["generated_at"] == "not-a-date"
+
+    def test_repo_filter_text_reason_counts(self, runner, tmp_path):
+        from repowise.core.workspace.diagnostics import UnmatchedConsumer
+        from repowise.core.workspace.system_graph import load_system_graph, save_system_graph
+
+        self._save(tmp_path)
+        graph = load_system_graph(tmp_path)
+        diag = graph.diagnostics
+        diag.unmatched_consumers.append(
+            UnmatchedConsumer("api", "c.py", "http::GET::/z", "http", "internal_only")
+        )
+        diag.unmatched_by_reason["internal_only"] = 1
+        save_system_graph(graph, tmp_path)
+
+        result = runner.invoke(
+            cli, ["workspace", "diagnostics", str(tmp_path), "--repo", "web"]
+        )
+        assert result.exit_code == 0, result.output
+        assert "2 unmatched consumer(s)" in result.output
+        # Reason counts follow the filtered list, not the workspace roll-up.
+        assert "intra-service" not in result.output
 
 
 # ---------------------------------------------------------------------------
