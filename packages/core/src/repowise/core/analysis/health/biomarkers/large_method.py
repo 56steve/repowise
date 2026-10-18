@@ -1,4 +1,4 @@
-"""Large Method — function bodies that exceed a healthy line budget.
+"""Long function — function bodies that exceed a healthy line budget.
 
 Counts lines of code, JSX markup lines excluded, once the judged CCN shows some
 branching: a long flat body (a data literal, a dispatch of one-line arms) is
