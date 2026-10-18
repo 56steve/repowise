@@ -91,6 +91,12 @@ export {
   type FileHealthPromptSignals,
 } from "./ai-prompts/file-health-prompt";
 export {
+  buildAreaAiPrompt,
+  type AreaPromptFile,
+  type AreaPromptFinding,
+  type BuildAreaPromptOptions,
+} from "./ai-prompts/area-prompt";
+export {
   buildPerformanceAreaPrompt,
   type BuildPerformanceAreaPromptOptions,
 } from "./ai-prompts/performance-area-prompt";

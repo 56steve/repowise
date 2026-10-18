@@ -338,6 +338,8 @@ export interface HealthFileMetric {
    * unchanged; this is a display-only secondary distinguisher.
    */
   total_deduction?: number | null;
+  /** Git flags this file a hotspot (heavy recent change). Map feed only; absent on older servers. */
+  is_hotspot?: boolean;
 }
 
 export interface HealthFinding {
@@ -1029,6 +1031,10 @@ export interface HealthMapQuery {
   q?: string;
   /** Narrow the field to this directory; the cap and every count then describe it. */
   area?: string;
+  /** `map` leaves out the origins the area map holds by default. */
+  hold?: "none" | "map";
+  /** With `hold: "map"`, held origins to bring back. */
+  include?: readonly string[];
 }
 
 /* ------------------------------------------------------------------ *
