@@ -76,6 +76,7 @@ from repowise.server.routers import (
     stats,
     symbols,
     webhooks,
+    wins,
     workspace,
 )
 from repowise.server.scheduler import setup_scheduler
@@ -330,6 +331,7 @@ _ROUTERS = (
     webhooks,
     git,
     changes,
+    wins,
     events,
     dead_code,
     doc_drift,
