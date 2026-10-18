@@ -31,7 +31,10 @@ export {
   type DocDriftPromptFinding,
 } from "./ai-prompts/doc-drift-prompt";
 export {
+  buildAreaCouplingAiPrompt,
   buildCouplingAiPrompt,
+  type AreaCouplingPromptPair,
+  type BuildAreaCouplingPromptOptions,
   type BuildCouplingPromptOptions,
   type CouplingPromptEdge,
   type CouplingPromptNode,
