@@ -275,11 +275,8 @@
       "emptyTitle": "No scored commits yet",
       "emptyAction": "Go to overview",
       "title": "Commits",
-      "description": "Every commit scored for change-risk against this repo's own history, so 'elevated' means elevated here rather than on some global curve.",
-      "emptyDescription": "Every commit scored for change-risk against this repo's own history.",
+      "description": "Every commit, led by what it did to code health. Review priority from the diff's shape stays alongside as context.",
       "emptyHint": "Per-commit change risk is captured on the next full index. Run a sync from the overview and the review queue fills in behind it.",
-      "reviewQueueTitle": "Review queue",
-      "reviewQueueDescription": "Newest first by default. Priority is a tercile of this repo's own distribution, so sorting by it shows only the top third — the filters narrow the whole repository, not the page.",
       "scoreBehaviourTitle": "How the score behaves here",
       "scoreBehaviourDescription": "Two views of the same model: where the cuts fall, and what commit shape lands you above them.",
       "changeRisk": "Change risk",
@@ -290,7 +287,82 @@
       "viewByCommit": "By commit",
       "viewEvents": "Events",
       "viewReview": "Review a change",
-      "reviewDescription": "Pick the files a change touches to see what depends on them, what tends to change with them, and who should review."
+      "reviewDescription": "Pick the files a change touches to see what depends on them, what tends to change with them, and who should review.",
+      "listTitle": "Commit history",
+      "listDescription": "Newest first, each led by what it did to code health. The filters narrow the whole repository, not the page.",
+      "hotspotMark": "Hotspot",
+      "period": {
+        "week": "Past week",
+        "month": "Past month",
+        "quarter": "Past quarter",
+        "all": "All time",
+        "custom": "Custom range"
+      },
+      "headline": {
+        "unit": "{n, plural, one {commit made health better} other {commits made health better}}",
+        "good": "Nothing made health worse. {better, plural, one {# commit made it better} other {# commits made it better}}, resolving {resolved, plural, one {# finding} other {# findings}}.",
+        "mixed": "{worse, plural, one {# commit made it worse} other {# made it worse}}, {both} of them while also making something better. {neutral} had no health impact.",
+        "quiet": "None of the {analysed, plural, one {# analysed commit} other {# analysed commits}} changed a health finding.",
+        "empty": "No commits in this window.",
+        "unscanned": "{n} not yet analysed.",
+        "catchingUpUnit": "of {total, plural, one {# commit} other {# commits}} analysed so far",
+        "catchingUp": "Most commits in this window have not been analysed by the current analyzer yet. Recent commits come first, as updates run; the rows below show each older commit's direction from the earlier analysis."
+      },
+      "wins": {
+        "title": "Recent wins",
+        "wholeRepo": "whole repository",
+        "findingsLabel": "Findings resolved",
+        "findingsUnit": "across {commits, plural, one {# commit} other {# commits}}",
+        "findingsWhy": "Most in one commit: {subject} ({resolved}).",
+        "filesLabel": "Files got healthier",
+        "filesUnit": "score rose",
+        "filesWhy": "Biggest gain: {path}, {before} to {after}.",
+        "refactorsLabel": "Refactorings landed",
+        "refactorsUnit": "planned and done",
+        "refactorsWhy": "{symbol}: complexity {before} to {after}.",
+        "refactorsWhyPlain": "{symbol} was refactored as planned.",
+        "none": "No wins recorded in this window yet. Resolved findings, healthier files and landed refactorings show up here as they happen."
+      },
+      "filters": {
+        "impactLabel": "Health impact",
+        "all": "All",
+        "better": "Made things better",
+        "worse": "Made things worse",
+        "none": "No health impact",
+        "hotspots": "Touched hotspots",
+        "windowLabel": "Time window",
+        "week": "Past week",
+        "month": "Past month",
+        "quarter": "Past quarter",
+        "allTime": "All time",
+        "custom": "Custom",
+        "from": "From",
+        "to": "To",
+        "author": "Author email or name",
+        "area": "Area, e.g. packages/core",
+        "moreFilters": "More filters",
+        "clearAll": "Clear all",
+        "impactPending": "Counts appear as commits are analysed by the current analyzer"
+      },
+      "lede": {
+        "label": "What this commit did to code health",
+        "unitWorse": "{worse, plural, one {finding introduced or worsened} other {findings introduced or worsened}} · {better} resolved",
+        "unitBetter": "{better, plural, one {finding resolved} other {findings resolved}} · nothing made worse",
+        "unitNeutral": "findings changed",
+        "worse": "Each one is listed below by file, worst first, with the symbol and line. The prompt hands them to your agent.",
+        "improved": "Resolved {better, plural, one {# finding} other {# findings}} and made nothing worse. Nice work.",
+        "neutral": "Compared clean: nothing introduced, worsened or resolved.",
+        "stale": "An earlier analysis read the direction shown; its counts do not compare with the current analysis, so none are shown.",
+        "unknown": "This commit has not been analysed for code health yet, so the review priority below is the only signal."
+      },
+      "chips": {
+        "author": "Author: {value}",
+        "area": "Area: {value}",
+        "search": "Search: {value}",
+        "high": "High priority",
+        "fixes": "Fixes",
+        "sortRisk": "Sorted by review priority"
+      }
     },
     "changes": {
       "description": "Every merged change on the main line, read back from git: pull and merge requests, Gerrit changes and lone commits, with the files each one landed.",
@@ -1272,9 +1344,13 @@
   "commits": {
     "detail": {
       "title": "Review this commit",
-      "promptLabel": "AI review prompt",
-      "promptTitle": "AI commit review",
-      "promptDescription": "A ready-to-paste prompt that has your AI agent review this commit's change-risk, flag what to scrutinize, and suggest reviewers."
+      "fixPromptLabel": "Copy prompt to fix what this commit made worse",
+      "fixPromptTitle": "Fix what this commit made worse",
+      "fixPromptDescription": "A ready-to-paste prompt that has your AI agent fix the findings this commit introduced or made more severe, at their files and lines, without undoing the commit.",
+      "reviewPromptLabel": "Copy review prompt for your agent",
+      "reviewPromptTitle": "AI commit review",
+      "reviewPromptDescription": "A ready-to-paste prompt that has your AI agent review this commit's change-risk, flag what to scrutinize, and suggest reviewers.",
+      "openFile": "Open file"
     }
   },
   "coupling": {
