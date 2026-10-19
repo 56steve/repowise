@@ -139,6 +139,14 @@ a `plan_ready` default-queue cause whose growth a loop outside a registry and a 
 Every other cause stays in the Performance view and is counted in Fix first as
 `unconfirmed_cost`.
 
+Every headline counts causes the same way, in the three scopes of the Performance
+tab: `now` (the default queue, worth fixing now), `production` (every open
+production cause) and `all`, plus `per_10k_loc` (every cause per 10K lines a
+detector ran on). The generated CLAUDE.md and AGENTS.md, `get_health` `kpis`,
+`repowise health`, `repowise status`, the Overview card and the Code Health page
+lead with `now`. The map's performance lens colours a file by its causes in the
+default queue.
+
 ## Reading it
 
 | Surface | How |
