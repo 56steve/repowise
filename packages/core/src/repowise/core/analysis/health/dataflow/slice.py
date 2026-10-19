@@ -106,6 +106,7 @@ from .slice_writes import (
     _outs_definitely_assigned,
     _stmt_assigns,
     _stmts_assign,
+    _trailing_constant_output,
     _unconditional_write,
     _writes_var,
 )
@@ -422,6 +423,8 @@ class _FunctionSlicer:
         if len(params) > _MAX_PARAMS or len(returns) > _MAX_RETURNS:
             return None
         if not _outs_definitely_assigned(span.nodes, returns, self.def_lines, self.lmap):
+            return None
+        if _trailing_constant_output(span.nodes, s, e, returns, self.def_lines, self.lmap):
             return None
         return params, returns
 
