@@ -1424,6 +1424,7 @@ def _run_partial_analyses(run: UpdateRun) -> None:
         stored_performance_callers=stored_performance_callers,
         repo_function_mod_p80=repo_function_mod_p80,
         timings=run.timings,
+        dead_code=not _dead_code_unchanged(run),
     )
     run.doc_drift_report = _run_doc_drift_partial(
         run.graph_builder,
@@ -1433,6 +1434,40 @@ def _run_partial_analyses(run: UpdateRun) -> None:
         base_ref=run.base_ref,
         file_diffs=run.file_diffs,
     )
+
+
+def _is_prose(path: str) -> bool:
+    from repowise.core.ingestion.languages.registry import REGISTRY
+
+    suffix = Path(path).suffix.lower()
+    # .mdx imports mark components reachable; .rst is read for symbol names.
+    return suffix != ".mdx" and REGISTRY.from_extension(suffix) in ("markdown", "asciidoc")
+
+
+def _dead_code_unchanged(run: UpdateRun) -> bool:
+    """Whether the stored dead-code findings still stand and nothing this run reads new ones.
+
+    True only when every changed file is prose, no analyzer, parser, renderer,
+    history or config change forces a re-score, and no page render in this run
+    consumes the report. (The knowledge graph takes the report but does not read it.)
+    """
+    config = run.config
+    if (
+        run.analyzer_changed
+        or run.extraction_changed
+        or run.renderer_changed
+        or run.history_stale
+        or config.changed
+    ):
+        return False
+    changed = [path for fd in run.file_diffs for path in (fd.path, fd.old_path) if path]
+    if not all(map(_is_prose, changed)):
+        return False
+    # Index-only renders template wikis only.
+    if run.index_only and resolve_docs_mode(run.state) != "deterministic":
+        return True
+    rendered = run.affected.regenerate if run.affected is not None else []
+    return all(map(_is_prose, rendered)) and not run.stale_deterministic_ids
 
 
 def _refresh_knowledge_graph_stage(run: UpdateRun) -> None:
