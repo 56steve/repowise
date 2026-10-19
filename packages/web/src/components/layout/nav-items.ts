@@ -110,7 +110,7 @@ export function repoNavGroups(repoId: string): NavGroup[] {
       label: "People & History",
       labelKey: "groupPeopleAndHistory",
       items: [
-        { label: "Contributors", labelKey: "contributors", href: `${base}/owners`, icon: Users },
+        { label: "Ownership", labelKey: "contributors", href: `${base}/owners`, icon: Users },
         { label: "Commits", labelKey: "commits", href: `${base}/commits`, icon: GitCommitHorizontal },
         { label: "Decisions", labelKey: "decisions", href: `${base}/decisions`, icon: Lightbulb },
       ],

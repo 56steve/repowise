@@ -19,7 +19,7 @@ const SEGMENT_LABELS: Record<string, string> = {
   decisions: "Decisions",
   commits: "Commits",
   changes: "Changes",
-  owners: "Contributors",
+  owners: "Ownership",
   modules: "Modules",
   wiki: "Wiki",
   health: "Code Health",
