@@ -30,6 +30,7 @@ from .scoring import (
     is_advisory,
     severity_deduction,
 )
+from .shape_curve import ceiling, continuous_base, group_by_function
 
 __all__ = [
     "MODULE_ROOT_LABEL",
@@ -214,20 +215,24 @@ def finding_base_deduction(finding: Any) -> float:
 
     Mirrors ``scoring.score_file``: a continuous ``deduction`` recorded in the
     finding's details (the coverage gradient scales with the uncovered fraction)
-    takes the place of the discrete severity table. Reading the override here is
-    what lets a breakdown show the continuous signal rather than a band proxy.
+    takes the place of the discrete severity table, and a critical sized finding
+    scales past its threshold (``shape_curve.continuous_base``).
     """
-    override = detail_map(finding).get("deduction")
+    details = detail_map(finding)
+    override = details.get("deduction")
     if isinstance(override, (int, float)):
         return float(override)
-    return severity_deduction(_severity_key(field(finding, "severity", None)))
+    severity = _severity_key(field(finding, "severity", None))
+    biomarker = field(finding, "biomarker_type", None) or ""
+    base = severity_deduction(severity)
+    return continuous_base(biomarker, base, severity == "critical", details)
 
 
 def finding_raw_deduction(finding: Any) -> float:
-    """One finding's deduction before any category cap redistributed it.
+    """One finding's deduction before its function group or category reshaped it.
 
-    ``base x weight``, the quantity ``_score_dimension`` computes and then
-    scales away. ``health_impact`` is what survives that scaling, so it moves
+    ``base x weight``, the quantity ``_score_dimension`` starts from and then
+    scales. ``health_impact`` is what survives that scaling, so it moves
     when a *neighbour* in the same capped category appears or goes away; this
     one depends on the finding alone. A breakdown needs it to say how much a
     category shed, and a change comparison needs it to ask whether one finding
@@ -263,11 +268,51 @@ def primary_and_magnitude_by_file(findings: Iterable[Any]) -> dict[str, dict[str
     return {path: primary_and_magnitude(fs) for path, fs in by_file.items()}
 
 
-def _scored_raw(finding: Any) -> float:
-    """:func:`finding_raw_deduction`, or 0 for a governance finding the score pass never saw."""
-    if field(finding, "biomarker_type", None) in GOVERNANCE_BIOMARKERS:
-        return 0.0
-    return finding_raw_deduction(finding)
+def _scored_raw(findings: list[Any]) -> list[float]:
+    """Each finding's raw deduction as the scorer grouped it by function.
+
+    A governance finding counts 0: the score pass never saw it.
+    """
+    raw = [
+        0.0
+        if field(f, "biomarker_type", None) in GOVERNANCE_BIOMARKERS
+        else finding_raw_deduction(f)
+        for f in findings
+    ]
+    names = [(field(f, "biomarker_type", "") or "", field(f, "function_name", None)) for f in findings]
+    group_by_function(names, raw)
+    return raw
+
+
+def _category_row(
+    category: str, entries: list[tuple[Any, float]], cap: float
+) -> tuple[dict[str, Any], float]:
+    """One breakdown row from ``(finding, raw)`` pairs, and its applied total."""
+    applied_each = [float(field(f, "health_impact", 0.0) or 0.0) for f, _ in entries]
+    raw_sum = sum(r for _, r in entries)
+    applied_sum = sum(applied_each)
+    row = {
+        "category": category,
+        "cap": round(cap, 2),
+        "raw_deduction": round(raw_sum, 3),
+        "applied_deduction": round(applied_sum, 3),
+        # Held at the cap; a curved category sheds weight but never sits at its ceiling.
+        "capped": category == HISTORY_CATEGORY and applied_sum < raw_sum - 1e-6,
+        "finding_count": len(entries),
+        "findings": [
+            {
+                "id": field(f, "id", None),
+                "biomarker_type": field(f, "biomarker_type", None),
+                "severity": field(f, "severity", None),
+                "raw_impact": round(raw, 3),
+                "applied_impact": round(applied, 3),
+                "function_name": field(f, "function_name", None),
+                "reason": field(f, "reason", None),
+            }
+            for (f, raw), applied in zip(entries, applied_each, strict=True)
+        ],
+    }
+    return row, applied_sum
 
 
 def score_breakdown(findings: Sequence[Any]) -> dict[str, Any]:
@@ -276,61 +321,38 @@ def score_breakdown(findings: Sequence[Any]) -> dict[str, Any]:
     The applied impact is the **stored** ``health_impact`` — the exact
     already-weighted-and-capped value the scorer produced at index time — so the
     breakdown reproduces the file's score instead of re-deriving it. Only the
-    raw (pre-cap) figure is reconstructed, with the same ``base x weight``
-    formula and the same history de-stacking, so a capped category is honest
-    about how much it shed.
+    raw figure is reconstructed, with the same ``base x weight`` formula,
+    function grouping and history de-stacking, so a category is honest about how
+    much its curve or cap shed. ``cap`` is history's hard cap, or for every other
+    category the ceiling its curve approaches.
 
     Categories are emitted in :data:`CATEGORY_CAPS` order and a category with no
     findings is omitted, not zero-filled.
     """
-    per_category: dict[str, list[Any]] = {}
-    for finding in findings:
-        biomarker = field(finding, "biomarker_type", None)
-        # No deduction to explain. Left in, it reports a raw deduction the
-        # file never paid and a ``capped`` flag on an uncapped category.
-        if is_advisory(biomarker or ""):
-            continue
-        per_category.setdefault(biomarker_category(biomarker), []).append(finding)
+    # Advisory findings deduct nothing; left in, they report a raw deduction
+    # the file never paid.
+    kept = [f for f in findings if not is_advisory(field(f, "biomarker_type", None) or "")]
+    per_category: dict[str, list[tuple[Any, float]]] = {}
+    for finding, raw in zip(kept, _scored_raw(kept), strict=True):
+        category = biomarker_category(field(finding, "biomarker_type", None))
+        per_category.setdefault(category, []).append((finding, raw))
 
     categories: list[dict[str, Any]] = []
     total_deduction = 0.0
     # The history cap follows the structure half, so report the one it scored under.
     structure, _ = deduction_split(findings)
     for category, static_cap in CATEGORY_CAPS.items():
-        entries = per_category.get(category, [])
-        if not entries:
-            continue
-        raw_each = [_scored_raw(f) for f in entries]
-        cap = static_cap
-        if category == HISTORY_CATEGORY:
-            cap, raw_each = history_cap(structure), destacked(raw_each)
-        applied_each = [float(field(f, "health_impact", 0.0) or 0.0) for f in entries]
-        raw_sum = sum(raw_each)
-        applied_sum = sum(applied_each)
-        categories.append(
-            {
-                "category": category,
-                "cap": round(cap, 2),
-                "raw_deduction": round(raw_sum, 3),
-                "applied_deduction": round(applied_sum, 3),
-                # Category shed weight iff its applied total is held at the cap.
-                "capped": applied_sum < raw_sum - 1e-6,
-                "finding_count": len(entries),
-                "findings": [
-                    {
-                        "id": field(f, "id", None),
-                        "biomarker_type": field(f, "biomarker_type", None),
-                        "severity": field(f, "severity", None),
-                        "raw_impact": round(raw, 3),
-                        "applied_impact": round(applied, 3),
-                        "function_name": field(f, "function_name", None),
-                        "reason": field(f, "reason", None),
-                    }
-                    for f, raw, applied in zip(entries, raw_each, applied_each, strict=True)
-                ],
-            }
-        )
-        total_deduction += applied_sum
+        if entries := per_category.get(category):
+            # Only history keeps a hard cap; every other category follows the curve.
+            if category == HISTORY_CATEGORY:
+                cap = history_cap(structure)
+                raw = destacked([r for _, r in entries])
+                entries = [(f, r) for (f, _), r in zip(entries, raw, strict=True)]
+            else:
+                cap = ceiling(static_cap)
+            row, applied = _category_row(category, entries, cap)
+            categories.append(row)
+            total_deduction += applied
     score = max(SCORE_FLOOR, min(SCORE_MAX, SCORE_MAX - total_deduction))
     return {
         "score": round(score, 2),

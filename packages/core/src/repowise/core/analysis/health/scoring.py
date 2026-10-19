@@ -1,9 +1,11 @@
 """Per-file score aggregation + repo-level KPIs.
 
 Each file starts at 10.0. Biomarker findings deduct; each finding's severity
-deduction is scaled by its biomarker's weight, then capped per category
-(:data:`CATEGORY_CAPS`; history by :func:`history_cap`). The final score is
-clamped to [1.0, 10.0].
+deduction is scaled by its biomarker's weight, then bounded per category: the
+defect score's code categories follow the saturating curve in ``shape_curve``
+scaled by :data:`CATEGORY_CAPS`, history keeps a hard cap (:func:`history_cap`),
+and the other dimensions cap each category. The final score is clamped to
+[1.0, 10.0].
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 from .grading import analysed_share
 from .models import HealthFileMetricData, HealthFindingData, Severity
 from .rows import field, scored_rows, split_tests, split_unscored
+from .shape_curve import continuous_base, group_by_function, saturated
 
 if TYPE_CHECKING:
     # Annotation-only, and deliberately not imported at runtime: the biomarker
@@ -40,7 +43,8 @@ SCORE_FIELDS: tuple[str, ...] = (
     "history_deduction",
 )
 
-# Per-category max deduction.
+# Per-category cap: a hard maximum for history and the non-defect dimensions,
+# the curve's scale (``shape_curve.ceiling``) for every other defect category.
 CATEGORY_CAPS: dict[str, float] = {
     "organizational": 3.5,
     "structural_complexity": 2.5,
@@ -50,7 +54,7 @@ CATEGORY_CAPS: dict[str, float] = {
     # ``test_coverage`` gates, so the additive, monotonic coverage signal is
     # bounded on its own terms and never squeezed by - or squeezes - the
     # has-tests / hotspot gates. Calibrated offline: a per-file deduction of
-    # 4.0 x uncovered_fraction (this cap binding at ≥50% uncovered) recovers
+    # 4.0 x uncovered_fraction (on a hard 2.0 cap) recovered
     # +0.043 corpus AUC [95% CI +0.023, +0.061] on the covered subset,
     # Popt-neutral, and is exactly zero where coverage was never ingested.
     "test_coverage_gradient": 2.0,
@@ -78,7 +82,7 @@ HISTORY_CATEGORY = "organizational"
 # own they measure activity: a simple file that changes often is busy, not
 # broken. History therefore amplifies code risk rather than standing alone: its
 # cap is 1.0 plus one point per point of structure deduction (every other defect
-# category, already capped), up to the category's 3.5. A file with no code-shape
+# category, after its curve), up to the category's 3.5. A file with no code-shape
 # finding keeps at least 9.0. Against a flat 3.5 cap this costs about 0.009
 # defect AUC; it is kept so a refactor can lift a file that history holds down.
 HISTORY_CAP_BASE: float = 1.0
@@ -105,8 +109,7 @@ def destacked(values: Sequence[float]) -> list[float]:
     return [v if i == top else v * HISTORY_STACK_SHARE for i, v in enumerate(values)]
 
 
-# Per-biomarker deduction by severity. The scorer caps the per-category
-# total at the value in ``CATEGORY_CAPS``.
+# Per-biomarker deduction by severity, before weights and category bounds.
 _SEVERITY_DEDUCTION: dict[Severity, float] = {
     Severity.LOW: 0.3,
     Severity.MEDIUM: 0.7,
@@ -169,8 +172,8 @@ _BIOMARKER_WEIGHT_MULTIPLIER: dict[str, float] = {
     # Error-handling anti-patterns: maintainability flag, NOT a fitted
     # predictor - deliberately excluded from the calibration roster (same
     # treatment as governance biomarkers). Floored weight + LOW severity
-    # (0.3 x 0.5 = 0.15/finding) + the 0.5 category cap keep the impact
-    # bounded at half a point per file regardless of hit count.
+    # (0.3 x 0.5 = 0.15/finding) + the 0.5 category scale keep the impact
+    # under about 1.5 points per file regardless of hit count.
     "error_handling": 0.5,
     # (coverage_gap, large_assertion_block, duplicated_assertion_block
     #  default to 1.0 - kept at prior)
@@ -226,15 +229,10 @@ _BIOMARKER_CATEGORY: dict[str, str] = {
 # Per-dimension scoring (defect / maintainability / performance)
 # ---------------------------------------------------------------------------
 #
-# The single surfaced health score is, and remains, the DEFECT score: today's
-# exact weights / categories / caps (the tables above), unchanged. Splitting the
-# score into dimensions is purely additive: ``maintainability`` and
+# The surfaced health score is the DEFECT score. ``maintainability`` and
 # ``performance`` are independent, independently-capped signals derived from the
-# SAME biomarker stream, and they NEVER feed back into ``defect``.
-#
-# The load-bearing guarantee (locked by ``tests/unit/health/test_scoring_dimensions``)
-# is that ``score_file(results)["defect"]`` reproduces the pre-split single
-# score byte-for-byte for any input. If that drifts, the split is wrong.
+# same biomarker stream, and they never feed back into ``defect``; the frozen
+# reference in ``tests/unit/health/test_scoring_dimensions`` locks that.
 
 DIMENSIONS: tuple[str, ...] = ("defect", "maintainability", "performance")
 
@@ -626,30 +624,49 @@ def performance_category(name: str) -> str:
 
 # Per category: ``(index into the scored results, weighted deduction)``.
 _Entries = dict[str, list[tuple[int, float]]]
+# A category's total from its raw sum and its cap.
+_Settle = Callable[[float, float], float]
 
 
-def _weighted_by_category(
+def _weighted(
     results_list: list[BiomarkerResult],
     weight_fn: Callable[[BiomarkerResult], float],
-    category_fn: Callable[[str], str],
-) -> _Entries:
-    """Each finding's ``base x weight``, grouped by category."""
-    raw: _Entries = {}
-    for idx, r in enumerate(results_list):
+    shaped: bool,
+) -> list[float]:
+    """Each finding's ``base x weight``; *shaped* applies the code-shape rules (``shape_curve``)."""
+    out: list[float] = []
+    for r in results_list:
         # A continuous ``deduction`` override (coverage scaled by the uncovered
         # fraction) takes the place of the severity table, so its impact stays linear.
         base = r.deduction if r.deduction is not None else severity_deduction(r.severity)
-        raw.setdefault(category_fn(r.biomarker_type), []).append((idx, base * weight_fn(r)))
+        if shaped and r.deduction is None:
+            critical = r.severity == Severity.CRITICAL
+            base = continuous_base(r.biomarker_type, base, critical, r.details)
+        out.append(base * weight_fn(r))
+    if shaped:
+        group_by_function([(r.biomarker_type, r.function_name) for r in results_list], out)
+    return out
+
+
+def _by_category(
+    results_list: list[BiomarkerResult], weighted: list[float], category_fn: Callable[[str], str]
+) -> _Entries:
+    raw: _Entries = {}
+    for idx, (r, d) in enumerate(zip(results_list, weighted, strict=True)):
+        raw.setdefault(category_fn(r.biomarker_type), []).append((idx, d))
     return raw
 
 
 def _condition(
-    raw: _Entries, caps: dict[str, float], conditioned_cap: tuple[str, Callable[[float], float]]
+    raw: _Entries,
+    caps: dict[str, float],
+    conditioned_cap: tuple[str, Callable[[float], float]],
+    settle: _Settle,
 ) -> dict[str, float]:
     """De-stack the conditioned category in place and return its live cap."""
     cond_cat, cap_fn = conditioned_cap
     others = sum(
-        min(sum(d for _, d in entries), caps.get(cat, 1.0))
+        settle(sum(d for _, d in entries), caps.get(cat, 1.0))
         for cat, entries in raw.items()
         if cat != cond_cat
     )
@@ -659,13 +676,16 @@ def _condition(
     return {cond_cat: cap_fn(others)}
 
 
-def _capped(entries: list[tuple[int, float]], cap: float, per_result: list[float]) -> float:
-    """Write each entry's share of the capped category total; return that total."""
+def _settled(
+    entries: list[tuple[int, float]], cap: float, settle: _Settle, per_result: list[float]
+) -> float:
+    """Write each entry's share of the settled category total; return that total."""
     cat_sum = sum(d for _, d in entries)
-    scale = 1.0 if cat_sum <= cap else cap / cat_sum
+    total = settle(cat_sum, cap)
+    scale = total / cat_sum if cat_sum > 0 else 0.0
     for idx, d in entries:
         per_result[idx] = d * scale
-    return min(cat_sum, cap)
+    return total
 
 
 def _score_dimension(
@@ -674,6 +694,8 @@ def _score_dimension(
     category_fn: Callable[[str], str],
     caps: dict[str, float],
     conditioned_cap: tuple[str, Callable[[float], float]] | None = None,
+    *,
+    shaped: bool = False,
 ) -> tuple[float, list[float]]:
     """Aggregate one dimension's deductions -> ``(score, per_result_deductions)``.
 
@@ -683,16 +705,21 @@ def _score_dimension(
 
     *conditioned_cap* ``(category, cap_fn)`` de-stacks that one category's
     findings (:func:`destacked`) and replaces its cap with ``cap_fn(sum of every
-    other category's capped total)``; only the defect dimension uses it, for the
-    history category.
+    other category's total)``; only the defect dimension uses it, for the
+    history category. *shaped* (defect only) applies ``shape_curve``: continuous
+    critical severity, per-function grouping, and the saturating curve in place
+    of every other category's hard cap.
     """
-    raw = _weighted_by_category(results_list, weight_fn, category_fn)
-    cap_for = _condition(raw, caps, conditioned_cap) if conditioned_cap else {}
+    raw = _by_category(results_list, _weighted(results_list, weight_fn, shaped), category_fn)
+    settle: _Settle = saturated if shaped else min
+    cap_for = _condition(raw, caps, conditioned_cap, settle) if conditioned_cap else {}
     per_result = [0.0] * len(results_list)
-    total = sum(
-        _capped(entries, cap_for.get(cat, caps.get(cat, 1.0)), per_result)
-        for cat, entries in raw.items()
-    )
+    total = 0.0
+    for cat, entries in raw.items():
+        if cat in cap_for:
+            total += _settled(entries, cap_for[cat], min, per_result)
+        else:
+            total += _settled(entries, caps.get(cat, 1.0), settle, per_result)
     score = max(SCORE_FLOOR, min(SCORE_MAX, SCORE_MAX - total))
     return score, per_result
 
@@ -729,25 +756,18 @@ def score_file(results: Iterable[BiomarkerResult]) -> tuple[dict[str, float | No
     Returns ``(scores, defect_deductions)`` where:
 
     - ``scores`` maps each dimension in ``DIMENSIONS`` to its score.
-      ``scores["defect"]`` is the historical single score - byte-for-byte
-      identical to the pre-split ``score_file`` (the load-bearing guarantee).
-      ``scores["performance"]`` is now measured (PR3): a file with no perf
-      findings scores 10.0; the perf detectors deduct under a single bounded
-      ``performance`` cap (2.0, a conservative ceiling). It never blends
-      into ``defect``.
+      ``scores["defect"]`` is the surfaced score. ``scores["performance"]``
+      is 10.0 for a file with no perf findings; perf detectors deduct under
+      one ``performance`` cap (2.0) and never blend into ``defect``.
     - ``defect_deductions`` is each finding's contribution to the DEFECT score
-      after category capping, parallel to *results*. It populates
-      ``HealthFindingData.health_impact`` - a defect-pillar quantity - so the
-      surfaced per-finding impact numbers are unchanged.
+      after grouping and category bounds, parallel to *results*. It populates
+      ``HealthFindingData.health_impact``, a defect-pillar quantity.
     """
     results_list = list(results)
 
-    # DEFECT: only biomarkers whose dimensions include ``defect`` deduct. EVERY
-    # historical biomarker does (``dimensions_for`` defaults to ``{"defect"}``),
-    # so this reproduces the pre-split single score byte-for-byte; the new
-    # performance-only detectors are excluded and never move the surfaced score.
-    # ``defect_deductions`` stays parallel to the FULL ``results_list`` (perf
-    # findings get 0.0 defect impact) so ``attach_impacts`` can zip 1:1.
+    # Only biomarkers whose dimensions include ``defect`` deduct here.
+    # ``defect_deductions`` stays parallel to the full ``results_list`` (others
+    # get 0.0) so ``attach_impacts`` can zip 1:1.
     defect_idx = [
         i for i, r in enumerate(results_list) if "defect" in dimensions_for(r.biomarker_type)
     ]
@@ -758,6 +778,7 @@ def score_file(results: Iterable[BiomarkerResult]) -> tuple[dict[str, float | No
         biomarker_category,
         CATEGORY_CAPS,
         conditioned_cap=(HISTORY_CATEGORY, history_cap),
+        shaped=True,
     )
     defect_deductions = [0.0] * len(results_list)
     for sub_i, orig_i in enumerate(defect_idx):
