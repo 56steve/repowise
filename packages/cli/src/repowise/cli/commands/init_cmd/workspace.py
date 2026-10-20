@@ -68,6 +68,7 @@ from repowise.cli.ui import (
 from repowise.core.docs_mode import docs_mode_state_fields
 from repowise.core.generation.styles import DEFAULT_STYLE
 
+from ._ingest import structural_generation_config
 from ._interactive import offer_distill_rewrite_hook, offer_hook_install
 from .generation import (
     CostGateDeclined,
@@ -439,6 +440,7 @@ def _index_repo(repo: Any, ctx: _WorkspaceCtx, repo_provider: Any) -> _RepoIndex
                 progress=callback,
                 existing_kg_fingerprint=_prev_kg_fp,
                 derive_environment_facts=True,
+                generation_config=structural_generation_config(ctx.index_only),
             )
         )
     console.print(f"    [{OK}]✓[/] {result.file_count:,} files, {result.symbol_count:,} symbols")
