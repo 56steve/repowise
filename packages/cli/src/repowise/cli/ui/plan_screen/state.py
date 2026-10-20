@@ -60,6 +60,9 @@ class PlanState:
     outside: tuple[str, ...] = ()
     this_repo_only: bool = False
     large_repo: bool = False
+    #: Machine-specific files git would see, and whether Enter excludes them.
+    keep_out: tuple[str, ...] = ()
+    git_exclude: bool = False
     #: Commits git history walks at most (``--commit-limit`` or config.yaml).
     commit_limit: int = 5000
 
