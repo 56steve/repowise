@@ -14,13 +14,14 @@ from collections import OrderedDict
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from ...support_paths import TEMPLATE_EXTENSIONS, is_doc_or_config_path
 from ...test_paths import is_test_related_path
 from ..finding_registry import excluded_types, gate_for, is_served, language_label
 from ..health import HEALTH_ANALYZER_VERSION, HealthFindingData
 from ..health.biomarker_labels import biomarker_label
+from ..health.finding_identity import finding_public_id
 from ..health.perf.causal import PERFORMANCE_MODEL_VERSION
 from ..health.scoring import ADVISORY_DIMENSION, is_advisory
 from .analyzer import (
@@ -35,6 +36,7 @@ from .file_scores import file_score_deltas
 from .identity import change_finding_id, finding_key, severity_rank
 from .matcher import FindingMatcher, MatchedFinding, MatchResult
 from .models import (
+    INCIDENTAL_BASES,
     NO_CODE_GAP,
     NOT_ANALYZABLE_DATA,
     NOT_CODE,
@@ -53,6 +55,9 @@ from .sources import (
     RevisionSource,
     filter_changes,
 )
+
+if TYPE_CHECKING:
+    from ..health.config import HealthConfig
 
 #: Changed files above this count are refused rather than analysed twice.
 MAX_CHANGED_FILES = 300
@@ -85,9 +90,6 @@ _DIMENSION_ORDER = {"defect": 0, "maintainability": 1, "performance": 2, ADVISOR
 
 _BASIS = "both_sides_analyzed"
 
-#: Bases that place a finding away from the lines the change wrote.
-_INCIDENTAL_BASES = {"file_change", "context_change", "unknown"}
-
 
 @dataclass(frozen=True, slots=True)
 class DeltaRequest:
@@ -115,6 +117,9 @@ class ChangeHealthDeltaService:
     *repo_path* holds a ``.repowise`` directory (and no *analyzer* is
     supplied) and to no cache otherwise; pass ``False`` to turn it off.
     Results are the same either way.
+
+    *health_config* is the rule set both sides are analysed under; without it
+    the rules are read from *repo_path*'s ``.repowise/health-rules.json``.
     """
 
     def __init__(
@@ -125,6 +130,7 @@ class ChangeHealthDeltaService:
         analyzer: RevisionHealthAnalyzer | None = None,
         rules_fingerprint: str = "",
         cache_dir: str | Path | Literal[False] | None = None,
+        health_config: HealthConfig | None = None,
     ) -> None:
         if source is None:
             if repo_path is None:
@@ -135,6 +141,7 @@ class ChangeHealthDeltaService:
         self._custom_analyzer = analyzer is not None
         self.analyzer = analyzer or RevisionHealthAnalyzer(repo_root=repo_path)
         self.rules_fingerprint = rules_fingerprint
+        self.health_config = health_config
         # A supplied analyzer may predate the ``caches`` argument: it caches
         # only when the caller names a directory.
         if analyzer is not None and cache_dir is None:
@@ -362,12 +369,20 @@ class ChangeHealthDeltaService:
         return _Sides(head_paths, head_sources, base_sources, head_run, base_run, rename)
 
     def _analyzer_for(self, paths: list[str]) -> RevisionHealthAnalyzer:
-        if self._custom_analyzer or self.repo_path is None:
+        if self._custom_analyzer:
             return self.analyzer
-        config = _analyzer_config(self.repo_path, paths)
-        if config is None:
+        cfg = self.health_config
+        if cfg is None:
+            if self.repo_path is None:
+                return self.analyzer
+            from ..health.config import HealthConfig
+
+            cfg = HealthConfig.load(self.repo_path)
+        if not cfg.has_overrides():
             return self.analyzer
-        return RevisionHealthAnalyzer(repo_root=self.repo_path, config=config)
+        return RevisionHealthAnalyzer(
+            repo_root=self.repo_path, config=cfg.to_analyzer_config(paths)
+        )
 
     def _surface(
         self,
@@ -435,6 +450,7 @@ class ChangeHealthDeltaService:
             opportunity_rank=perf.rank_score if perf else None,
             evidence=_evidence(head, perf),
             moved_from={"path": moved_from[0], "symbol": moved_from[1]} if moved_from else None,
+            finding_id=finding_public_id(head),
         )
 
 
@@ -693,7 +709,7 @@ def _authorship(finding: ChangeFinding) -> tuple[bool, bool, bool]:
     scaffolding sorts last because it is the change's own noise.
     """
     return (
-        finding.attribution_basis in _INCIDENTAL_BASES,
+        finding.attribution_basis in INCIDENTAL_BASES,
         is_test_related_path(finding.path),
         finding.change_kind != "introduced",
     )
@@ -791,11 +807,3 @@ def _resolve_cache_dir(
         return None
     index_dir = Path(repo_path) / ".repowise"
     return index_dir / _CACHE_SUBDIR if index_dir.is_dir() else None
-
-
-def _analyzer_config(repo_path: str, paths: list[str]) -> dict[str, object] | None:
-    """The repo's `.repowise/health-rules.json` as analyzer config, or `None`."""
-    from ..health.config import HealthConfig
-
-    cfg = HealthConfig.load(repo_path)
-    return cfg.to_analyzer_config(paths) if cfg.has_overrides() else None
