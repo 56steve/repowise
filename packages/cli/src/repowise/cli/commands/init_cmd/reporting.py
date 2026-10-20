@@ -16,11 +16,11 @@ from repowise.cli.ui import (
     ERR,
     OK,
     WARN,
-    build_completion_panel,
     build_contextual_next_steps,
     build_status_notes,
     format_elapsed,
     keyless_upgrade_note,
+    print_completion_panel,
     print_files_written,
 )
 from repowise.cli.ui.mode_names import (
@@ -93,8 +93,8 @@ def show_completion(
     provider: Any,
     setup: Any = None,
     files_written: list[Path] | None = None,
-) -> None:
-    """Render the final completion panel (index-only or full mode).
+) -> list[tuple[str, str]]:
+    """Render the final completion panel (index-only or full mode); returns its next steps.
 
     *setup* is the :class:`~repowise.cli.editor_setup.EditorSetupOutcome`
     snapshot, so the next-step panel and the MCP status note reflect what setup
@@ -212,9 +212,7 @@ def show_completion(
             setup=setup,
         )
         console.print()
-        console.print(
-            build_completion_panel(completion_title(_scope), metrics, next_steps=next_steps)
-        )
+        print_completion_panel(console, completion_title(_scope), metrics, next_steps)
         console.print()
         # Fast mode reaches this branch too, and it generates nothing, so the
         # note has to check rather than assume.
@@ -297,9 +295,7 @@ def show_completion(
         )
 
         console.print()
-        console.print(
-            build_completion_panel(completion_title(_scope), metrics, next_steps=next_steps)
-        )
+        print_completion_panel(console, completion_title(_scope), metrics, next_steps)
         console.print()
         _print_embed_failure(_embed_failed)
         if not _semantic_on and not _embed_failed and _scope["search"]["next_command"]:
@@ -324,6 +320,7 @@ def show_completion(
     print_files_written(console, Path(repo_path), files_written or [])
 
     _show_generation_checks(result)
+    return next_steps
 
 
 def _print_embed_failure(failed: int) -> None:
@@ -422,9 +419,7 @@ def show_workspace_completion(
     next_steps = _workspace_next_steps(run_mode, index_only or provider is None)
 
     console.print()
-    console.print(
-        build_completion_panel(TITLE_WORKSPACE, metrics, next_steps=next_steps)
-    )
+    print_completion_panel(console, TITLE_WORKSPACE, metrics, next_steps)
     console.print()
 
     # Honest docs status — print a per-repo summary listing exactly which
