@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 
+from repowise.cli.ui.mode_names import model_name
 from repowise.cli.ui.repo_scanner import (
     RepoScanInfo,
     estimated_model_minutes,
@@ -26,7 +27,7 @@ class ModelPrice:
     @property
     def model_label(self) -> str:
         """The model id without a repeated ``<provider>/`` prefix."""
-        return self.model.removeprefix(f"{self.provider}/")
+        return model_name(self.provider, self.model) or self.model
 
 
 @dataclass(frozen=True)
