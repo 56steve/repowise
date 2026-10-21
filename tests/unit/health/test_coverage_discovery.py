@@ -382,6 +382,44 @@ def test_coverage_config_parses_block() -> None:
     assert cfg.reingest_on_update is True
 
 
+def test_reingest_rereads_a_report_written_after_the_last_ingest() -> None:
+    from datetime import UTC, datetime
+
+    last = datetime(2026, 10, 1, 12, 0, tzinfo=UTC)
+    before, after = last.timestamp() - 60, last.timestamp() + 60
+    auto = CoverageConfig.from_repo_config({"coverage": {}})
+    assert auto.reingest_on_update is None
+    assert auto.reingest(after, last) is True
+    assert auto.reingest(before, last) is False
+    # A naive stored time is UTC.
+    assert auto.reingest(after, last.replace(tzinfo=None)) is True
+    # Nothing stored yet: any report is read; no report: nothing to read.
+    assert auto.reingest(before, None) is True
+    assert auto.reingest(None, last) is False
+    # A report dated in the future is not newer, or every update would re-read it.
+    assert auto.reingest(after, last, now=last.timestamp() + 30) is False
+    # The setting forces either way.
+    off = CoverageConfig.from_repo_config({"coverage": {"reingest_on_update": False}})
+    on = CoverageConfig.from_repo_config({"coverage": {"reingest_on_update": True}})
+    assert off.reingest(after, last) is False
+    assert on.reingest(before, last) is True
+
+
+def test_watched_reports_stat_fixed_locations_without_a_walk(tmp_path: Path) -> None:
+    (tmp_path / "coverage").mkdir()
+    (tmp_path / "coverage" / "lcov.info").write_text("SF:a.py\nend_of_record\n")
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "cobertura.xml").write_text("<coverage/>")
+    cfg = CoverageConfig.from_repo_config(None)
+    # The nested report needs the ``**/cobertura.xml`` walk, so only discovery finds it.
+    assert cfg.watched_reports(tmp_path) == [tmp_path / "coverage" / "lcov.info"]
+    assert len(cfg.reports(tmp_path)) == 2
+    named = CoverageConfig.from_repo_config({"coverage": {"paths": ["pkg/cobertura.xml"]}})
+    assert named.watched_reports(tmp_path) == [tmp_path / "pkg" / "cobertura.xml"]
+    off = CoverageConfig.from_repo_config({"coverage": {"auto_discover": False}})
+    assert off.watched_reports(tmp_path) == []
+
+
 def test_coverage_config_paths_take_globs_and_per_report_prefixes(tmp_path: Path) -> None:
     for rel in ("web/coverage/lcov.info", "api/coverage/lcov.info", "root.lcov"):
         (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
