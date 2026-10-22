@@ -258,6 +258,16 @@ Most plans answer a health finding, so per-path marker rules in
   code declares them; `<type>` marks a type for you to fill in. It flags an
   awaiting span with `needs_async: true` and a receiver-bound helper under
   `new_symbol`.
+- A TypeScript span is not offered when a test above or around it narrows a
+  value no helper parameter can carry: a property the span reads
+  (`if (!tc.result) continue;` before `tc.result.id`), a property compared with
+  a literal, or a module-level name (`assert(cursor !== undefined)`). Nor is a
+  span holding an `assert` the code after it relies on, or one that assigns a
+  name declared outside it without taking or returning it.
+  One such stage refuses the whole staged split; the finding records
+  `narrowing_lost` or `outer_declaration` in `details.extract_method_stage_refused`.
+  A guard or `if` narrowing a parameter gets a note to type it as narrowed, and
+  an output declared before the span a note to declare it in the helper.
 - A step Repowise cannot express mechanically is a judgment call with a reason
   code: `async_helper_unexpressible`, `receiver_unbound` or
   `receiver_copy_written`.
