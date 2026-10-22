@@ -497,6 +497,33 @@ def test_decision_health_prints_summary(indexed_repo: Path) -> None:
     assert "Proposed (needs review)" in result.output
 
 
+def test_decision_health_lists_print_the_whole_title(indexed_repo: Path) -> None:
+    title = "Backfill path mapping needs repo-tied evidence for deleted directories"
+    assert len(title) > 50
+    _seed_wiki_db(
+        indexed_repo,
+        [
+            {
+                "id": "jjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjj",
+                "title": title,
+                "status": "proposed",
+            },
+            {
+                "id": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk",
+                "title": title,
+                "status": "active",
+                "staleness": 0.8,
+            },
+        ],
+    )
+
+    result = CliRunner().invoke(cli, ["decision", "health", str(indexed_repo)])
+    assert result.exit_code == 0, result.output
+    # Rich wraps long lines at the terminal width, so compare ignoring whitespace.
+    flattened = " ".join(result.output.split())
+    assert flattened.count(title) == 2, result.output
+
+
 class TestTheLifecycleIsDrivableByAnAgent:
     """Confirm/dismiss/deprecate are how a decision gains and loses authority.
 

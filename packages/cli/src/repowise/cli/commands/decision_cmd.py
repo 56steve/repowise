@@ -1107,7 +1107,7 @@ def _print_health_lists(health: dict) -> None:
         "Stale decisions",
         health["stale_decisions"],
         5,
-        lambda d: f"{d.id[:8]}  {d.title[:50]}  (staleness: {d.staleness_score:.2f})",
+        lambda d: f"{d.id[:8]}  {d.title}  (staleness: {d.staleness_score:.2f})",
     )
     _print_capped("yellow", "Ungoverned hotspots", health["ungoverned_hotspots"], 10, str)
     _print_capped(
@@ -1115,7 +1115,7 @@ def _print_health_lists(health: dict) -> None:
         "Proposed decisions",
         health["proposed_awaiting_review"],
         5,
-        lambda d: f"{d.id[:8]}  {d.title[:50]}  (source: {d.source})",
+        lambda d: f"{d.id[:8]}  {d.title}  (source: {d.source})",
     )
 
 
