@@ -213,28 +213,37 @@ async def test_stats_file_count_excludes_symbol_nodes(client: AsyncClient, sessi
     """
     from repowise.core.persistence.crud import upsert_repository
     from repowise.core.persistence.models import GraphNode
+    from tests.unit.persistence.helpers import make_wiki_symbol
 
     repo = await upsert_repository(session, name="counts", local_path="/tmp/counts")
     for i in range(2):
+        # The parser emitted an overload pair: 6 emissions, 5 distinct symbols.
+        # The stored per-file figure of a pre-dedupe index still says 6.
         session.add(
             GraphNode(
                 repository_id=repo.id,
                 node_id=f"src/mod{i}.py",
                 node_type="file",
-                symbol_count=5,
+                symbol_count=6,
             )
         )
-        for j in range(5):
+        for name in [f"sym{j}" for j in range(5)] + ["__module__"]:
             session.add(
                 GraphNode(
                     repository_id=repo.id,
-                    node_id=f"src/mod{i}.py::sym{j}",
+                    node_id=f"src/mod{i}.py::{name}",
                     node_type="symbol",
                 )
             )
+        session.add_all(make_wiki_symbol(repo.id, f"src/mod{i}.py", f"sym{j}") for j in range(5))
     await session.commit()
 
     data = (await client.get(f"/api/repos/{repo.id}/stats")).json()
+    overview = (await client.get(f"/api/repos/{repo.id}/overview-summary")).json()
+    symbols = (await client.get("/api/symbols", params={"repo_id": repo.id})).json()
 
-    assert data["file_count"] == 2  # not 12
+    assert data["file_count"] == 2  # not 14
+    # One figure, the symbol index's row count: not 12 symbol nodes, not 12 emissions.
     assert data["symbol_count"] == 10
+    assert overview["stats"]["symbol_count"] == 10
+    assert symbols["total"] == 10
