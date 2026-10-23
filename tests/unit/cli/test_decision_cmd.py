@@ -524,6 +524,33 @@ def test_decision_health_lists_print_the_whole_title(indexed_repo: Path) -> None
     assert flattened.count(title) == 2, result.output
 
 
+def test_decision_health_lists_treat_titles_as_plain_text(indexed_repo: Path) -> None:
+    markup_title = "Use [bold]x[/bold] for the cache key"
+    closing_title = "Drop the [/] shorthand"
+    _seed_wiki_db(
+        indexed_repo,
+        [
+            {
+                "id": "llllllllllllllllllllllllllllllll",
+                "title": markup_title,
+                "status": "proposed",
+            },
+            {
+                "id": "mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm",
+                "title": closing_title,
+                "status": "active",
+                "staleness": 0.8,
+            },
+        ],
+    )
+
+    result = CliRunner().invoke(cli, ["decision", "health", str(indexed_repo)])
+    assert result.exit_code == 0, result.output
+    flattened = " ".join(result.output.split())
+    assert markup_title in flattened, result.output
+    assert closing_title in flattened, result.output
+
+
 class TestTheLifecycleIsDrivableByAnAgent:
     """Confirm/dismiss/deprecate are how a decision gains and loses authority.
 
